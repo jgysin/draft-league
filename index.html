@@ -140,7 +140,6 @@
 /* ================= config ================= */
 const EMBEDDED_CONFIG = {"apiKey": "AIzaSyC1R_499lbW7pJODNvM1yWNUX9blw_9hx8", "authDomain": "plleague.firebaseapp.com", "projectId": "plleague", "storageBucket": "plleague.firebasestorage.app", "messagingSenderId": "549468608800", "appId": "1:549468608800:web:77089309725edad1525f45"};
 const LS_CFG = "pl-league-fbconfig";
-const LS_SESSION = "pl-league-session";
 
 const POSITIONS = ["GK","DEF","MID","FWD"];
 const POS_ORDER = { GK:0, DEF:1, MID:2, FWD:3 };
@@ -193,10 +192,13 @@ function fmtWhen(ts) {
 
 /* ================= state cache ================= */
 let F = null, db = null;                  // firestore module + instance
+let A = null, authInst = null;            // firebase-auth module + instance
+let authUser = null;                      // signed-in Google user (or null)
+let authReady = false;                    // onAuthStateChanged has fired once
 let C = {
   config: null,          // meta/config
   players: {},           // meta/players: pid -> {name, position, nickname}
-  managers: [],          // [{id, name, pin, roster:[pid]}]
+  managers: [],          // [{id, name, email, admin, roster:[pid]}]
   gameweeks: {},         // gw -> {stats:{pid:{}}, owners:{pid:mid}}
   chat: [], trades: [], txns: [],
   draft: null,           // meta/draft: {status, order, rounds, quotas, picks}
@@ -204,12 +206,21 @@ let C = {
   schedule: null,        // meta/schedule: {"1":["midA|midB",...], ...}
 };
 let ready = { config:false, managers:false, players:false, gameweeks:false };
-let session = null;      // {type:'manager'|'admin', mid?}
-try { session = JSON.parse(localStorage.getItem(LS_SESSION)); } catch (e) {}
+let session = null;      // computed: {type:'manager',mid} | {type:'admin'} | {type:'orphan',email} | null
 let tab = "standings";
 let viewGw = 1;
-let loginTarget = null;  // mid or 'admin' while PIN prompt shown
 
+function emailEq(a, b) { return !!a && !!b && a.toLowerCase() === b.toLowerCase(); }
+function computeSession() {
+  const email = authUser?.email || null;
+  if (!email) { session = null; return; }
+  const m = C.managers.find(x => emailEq(x.email, email));
+  if (m) { session = { type: "manager", mid: m.id }; return; }
+  if (emailEq(email, C.config?.commissionerEmail)) { session = { type: "admin" }; return; }
+  // Migration/bootstrap: a league with no commissioner email yet — first signed-in user can claim it.
+  if (C.config && !C.config.commissionerEmail) { session = { type: "admin" }; return; }
+  session = { type: "orphan", email };
+}
 function isAdmin() { return session?.type === "admin" || !!me()?.admin; }
 function me() { return session?.type === "manager"
   ? C.managers.find(m => m.id === session.mid) : null; }
@@ -433,8 +444,11 @@ async function boot() {
   try {
     const appMod = await import("https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js");
     F = await import("https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js");
+    A = await import("https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js");
     const app = appMod.initializeApp(cfg);
     db = F.initializeFirestore(app, { experimentalAutoDetectLongPolling: true });
+    authInst = A.getAuth(app);
+    A.onAuthStateChanged(authInst, u => { authUser = u; authReady = true; render(); });
   } catch (e) {
     $("main").innerHTML = `<div class="center"><h2>Connection failed</h2>
       <p class="muted">${esc(e.message)}</p>
@@ -501,12 +515,14 @@ async function saveConfig(patch) {
 /* ================= render root ================= */
 function setTab(t) { tab = t; render(); }
 function render() {
+  computeSession();
   const cfg = C.config;
   $("league-name").textContent = cfg?.leagueName || "Draft League";
   document.title = cfg?.leagueName || "Draft League";
   $("who").textContent = me() ? "◆ " + me().name + (me().admin ? " (admin)" : "")
-    : session?.type === "admin" ? "◆ commissioner" : "";
-  $("session-btn").textContent = session ? "Sign out" : "Sign in";
+    : session?.type === "admin" ? "◆ commissioner"
+    : session?.type === "orphan" ? "◆ " + session.email + " (not on roster)" : "";
+  $("session-btn").textContent = authUser ? "Sign out" : "Sign in with Google";
   if (allReady()) { $("conn").textContent = "● live"; $("conn").classList.add("ok"); }
 
   if (!db) return; // connect screen handles its own rendering
@@ -516,7 +532,6 @@ function render() {
   $("nav").style.display = "";
   document.querySelectorAll("nav button").forEach(b =>
     b.classList.toggle("active", b.dataset.tab === tab));
-  if (loginTarget !== null) { renderLogin(); return; }
   const views = { standings: renderStandings, gameweek: renderGameweek, rosters: renderRosters,
                   draft: renderDraft, trades: renderTrades, chat: renderChat, settings: renderSettings };
   $("main").innerHTML = views[tab]();
@@ -558,103 +573,49 @@ function saveCfgInput() {
 function clearCfg() { localStorage.removeItem(LS_CFG); location.reload(); }
 
 function renderCreateLeague() {
+  if (!authUser) {
+    $("main").innerHTML = `<div class="center">
+    <h2>Create your league</h2>
+    <p class="muted">Connected to Firebase. Sign in with your Google account &mdash; it becomes the
+      commissioner account for this league.</p>
+    <div class="row"><button class="act" onclick="signIn()">Sign in with Google</button></div>
+    </div>`;
+    return;
+  }
   $("main").innerHTML = `<div class="center">
   <h2>Create your league</h2>
-  <p class="muted">Connected to Firebase. Now name the league and set the commissioner password.</p>
+  <p class="muted">Signed in as <strong>${esc(authUser.email)}</strong> &mdash; you'll be the commissioner.
+    Name the league to get started.</p>
   <div class="row"><input id="new-league-name" placeholder="League name" style="width:100%"></div>
-  <div class="row"><input id="new-admin-pin" placeholder="Commissioner password (required)" style="width:100%"></div>
   <div class="row"><button class="act" onclick="createLeague()">Create league</button></div>
   </div>`;
 }
 async function createLeague() {
   const name = $("new-league-name").value.trim() || "Draft League";
-  const pin = $("new-admin-pin").value.trim();
-  if (!pin) { flash("set an admin PIN"); return; }
+  if (!authUser) { flash("sign in with Google first"); return; }
   await F.setDoc(F.doc(db, "meta", "config"),
-    { leagueName: name, adminPin: pin, scoring: { ...DEFAULT_SCORING } });
+    { leagueName: name, commissionerEmail: authUser.email.toLowerCase(), scoring: { ...DEFAULT_SCORING } });
   await F.setDoc(F.doc(db, "meta", "players"), {}, { merge: true });
-  session = { type: "admin" };
-  localStorage.setItem(LS_SESSION, JSON.stringify(session));
   tab = "settings";
   flash("league created — add managers in Settings");
 }
 
-/* ================= auth ================= */
-async function sha256(s) {
-  const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(s));
-  return [...new Uint8Array(buf)].map(b => b.toString(16).padStart(2, "0")).join("");
-}
-function usernameOf(m) {
-  return (m.username || m.name || "").toLowerCase().replace(/\s+/g, "");
-}
-function sessionBtn() {
-  if (session) {
-    session = null; localStorage.removeItem(LS_SESSION); render();
-  } else { loginTarget = "user"; render(); }
-}
-function renderLogin() {
-  let html;
-  if (loginTarget === "admin") {
-    html = `<div class="center"><h2>Commissioner sign-in</h2>
-    <p class="muted">Fallback access using the commissioner password from Settings.</p>
-    <div class="row"><input id="admin-pass" type="password" placeholder="Commissioner password"
-      onkeydown="if(event.key==='Enter')doAdminLogin()">
-    <button class="act" onclick="doAdminLogin()">Enter</button></div>
-    <div class="row"><button class="tiny" onclick="gotoUserLogin()">back</button>
-    <button class="tiny" onclick="cancelLogin()">cancel</button></div></div>`;
-  } else {
-    html = `<div class="center"><h2>Sign in</h2>
-    <div class="row"><input id="login-user" placeholder="Username" style="width:200px"
-      onkeydown="if(event.key==='Enter')document.getElementById('login-pass').focus()"></div>
-    <div class="row"><input id="login-pass" type="password" placeholder="Password" style="width:200px"
-      onkeydown="if(event.key==='Enter')doLogin()"></div>
-    <div class="row"><button class="act" onclick="doLogin()">Sign in</button></div>
-    <p class="muted">First time? Your first sign-in sets your password — pick a good one (4+ characters).</p>
-    <div class="row"><button class="tiny" onclick="gotoAdminLogin()">commissioner sign-in</button>
-    <button class="tiny" onclick="cancelLogin()">cancel</button></div></div>`;
+/* ================= auth (Google sign-in) ================= */
+function sessionBtn() { authUser ? signOut() : signIn(); }
+async function signIn() {
+  if (!authInst) { flash("still connecting…"); return; }
+  try {
+    await A.signInWithPopup(authInst, new A.GoogleAuthProvider());
+  } catch (e) {
+    if (e.code === "auth/popup-closed-by-user" || e.code === "auth/cancelled-popup-request") return;
+    if (e.code === "auth/unauthorized-domain")
+      flash("this domain isn't authorized in Firebase → Authentication → Settings");
+    else if (e.code === "auth/operation-not-allowed")
+      flash("enable Google sign-in in Firebase → Authentication → Sign-in method");
+    else flash("sign-in failed: " + (e.code || e.message));
   }
-  $("main").innerHTML = html;
-  const el = $(loginTarget === "admin" ? "admin-pass" : "login-user");
-  if (el) el.focus();
 }
-function gotoAdminLogin() { loginTarget = "admin"; render(); }
-function gotoUserLogin() { loginTarget = "user"; render(); }
-function cancelLogin() { loginTarget = null; render(); }
-function finishLogin(s) {
-  session = s;
-  localStorage.setItem(LS_SESSION, JSON.stringify(session));
-  loginTarget = null; render();
-}
-async function doLogin() {
-  const u = $("login-user").value.trim().toLowerCase().replace(/\s+/g, "");
-  const p = $("login-pass").value;
-  if (!u) { flash("enter your username"); return; }
-  const m = C.managers.find(x => usernameOf(x) === u);
-  if (!m) { flash("no manager with that username"); return; }
-  if (!m.pw) {
-    if (p.length < 4) { flash("first sign-in sets your password — use 4+ characters"); return; }
-    await F.updateDoc(F.doc(db, "managers", m.id), { pw: await sha256(p) });
-    finishLogin({ type: "manager", mid: m.id });
-    flash("password set — welcome, " + m.name);
-    return;
-  }
-  if (await sha256(p) !== m.pw) { flash("wrong password"); return; }
-  finishLogin({ type: "manager", mid: m.id });
-}
-function doAdminLogin() {
-  const p = $("admin-pass").value;
-  if (p !== C.config.adminPin) { flash("wrong password"); return; }
-  finishLogin({ type: "admin" });
-}
-async function changeMyPassword() {
-  const m = me();
-  if (!m) return;
-  const p = prompt("New password (4+ characters):");
-  if (p === null) return;
-  if (p.length < 4) { flash("too short"); return; }
-  await F.updateDoc(F.doc(db, "managers", m.id), { pw: await sha256(p) });
-  flash("password changed");
-}
+async function signOut() { try { await A.signOut(authInst); } catch (e) {} }
 
 /* ================= standings ================= */
 function renderStandings() {
@@ -804,8 +765,7 @@ function renderRosters() {
   if (!C.managers.length)
     return `<p class="muted" style="margin-top:20px">No managers yet.</p>`;
   let html = `<h2>Rosters</h2>`;
-  if (!session) html += `<p class="muted">Sign in to manage your squad.</p>`;
-  if (me()) html += `<div class="row"><button class="tiny" onclick="changeMyPassword()">change my password</button></div>`;
+  if (!me() && !isAdmin()) html += `<p class="muted">Sign in with Google to manage your squad.</p>`;
   for (const m of C.managers) {
     const mine = canManage(m.id);
     html += `<div class="card"><div class="mgr-name">${esc(m.name)}
@@ -1296,8 +1256,10 @@ function renderSettings() {
   let html = `<h2>League</h2>
   <div class="row">
     <label>Name <input value="${esc(C.config.leagueName)}" onchange="saveLeague('leagueName',this.value)"></label>
-    <label>Commissioner password (fallback) <input value="${esc(C.config.adminPin)}" onchange="saveLeague('adminPin',this.value.trim())"></label>
+    <label>Commissioner email <input style="width:200px" value="${esc(C.config.commissionerEmail || "")}"
+      placeholder="you@gmail.com" onchange="saveLeague('commissionerEmail',this.value.trim().toLowerCase())"></label>
   </div>
+  <p class="muted">The commissioner email always has admin access (even without a manager row). Change it to hand off the league.</p>
 
   <h2>Scoring</h2>
   <p class="muted">Change anytime — every gameweek re-scores automatically from raw stats, for everyone, live.</p>
@@ -1310,15 +1272,14 @@ function renderSettings() {
   html += `</div><div class="row"><button class="act ghost" onclick="resetScoring()">Reset to defaults</button></div>
 
   <h2>Managers</h2>
-  <p class="muted">Managers sign in with username + password. Their first sign-in sets their password;
-    "reset" clears it so their next sign-in sets a new one. Admins get full commissioner powers.</p>
-  <table><tr><th>Manager</th><th>Username</th><th>Password</th><th>Admin</th><th></th></tr>`;
+  <p class="muted">Everyone signs in with Google. Enter each manager's Google (Gmail) address &mdash;
+    that's how their sign-in is matched to their team. Admins get full commissioner powers.</p>
+  ${C.config.commissionerEmail ? "" : `<p class="badge">⚠ No commissioner email set yet — set it above so you keep admin access after others sign in.</p>`}
+  <table><tr><th>Manager</th><th>Google email</th><th>Admin</th><th></th></tr>`;
   for (const m of C.managers) {
     html += `<tr><td class="mgr-name">${esc(m.name)}</td>
-      <td><input style="width:110px" value="${esc(usernameOf(m))}"
-        onchange="setManagerField('${m.id}','username',this.value.trim().toLowerCase().replace(/\\s+/g,''))"></td>
-      <td>${m.pw ? `set <button class="tiny del" onclick="resetManagerPw('${m.id}')">reset</button>`
-                 : `<span class="muted">set on first sign-in</span>`}</td>
+      <td><input style="width:200px" value="${esc(m.email || "")}" placeholder="name@gmail.com"
+        onchange="setManagerField('${m.id}','email',this.value.trim().toLowerCase())"></td>
       <td><input type="checkbox" ${m.admin ? "checked" : ""}
         onchange="setManagerField('${m.id}','admin',this.checked)"></td>
       <td><button class="tiny" onclick="renameManager('${m.id}')">rename</button>
@@ -1353,8 +1314,8 @@ function renderSettings() {
   <div class="row"><button class="act" onclick="bakeDownload()">Download shareable copy</button>
   <button class="act ghost" onclick="exportBackup()">Export data backup (.json)</button></div>
 
-  <p class="muted" style="margin-top:14px">Note: this is friends-league security, not bank security. PINs keep people honest;
-    anyone with the file could technically poke the database. The transaction log keeps everyone accountable.</p>`;
+  <p class="muted" style="margin-top:14px">Note: this is friends-league security, not bank security. Google sign-in identifies
+    who's who; anyone with the file could technically poke the database directly. The transaction log keeps everyone accountable.</p>`;
   return html;
 }
 async function saveLeague(key, val) { await saveConfig({ [key]: val }); flash("saved"); }
@@ -1369,7 +1330,7 @@ async function addManager() {
   const el = $("new-mgr");
   const name = el.value.trim();
   if (!name) return;
-  await F.setDoc(F.doc(db, "managers", uid()), { name, pin: "", roster: [] });
+  await F.setDoc(F.doc(db, "managers", uid()), { name, email: "", roster: [] });
   el.value = "";
 }
 async function renameManager(mid) {
@@ -1379,11 +1340,6 @@ async function renameManager(mid) {
 }
 async function setManagerField(mid, key, val) {
   await F.updateDoc(F.doc(db, "managers", mid), { [key]: val }); flash("saved");
-}
-async function resetManagerPw(mid) {
-  const m = mgrById(mid);
-  if (!confirm(`Reset ${m.name}'s password? Their next sign-in sets a new one.`)) return;
-  await F.updateDoc(F.doc(db, "managers", mid), { pw: "" });
 }
 async function deleteManager(mid) {
   const m = mgrById(mid);
@@ -1418,12 +1374,11 @@ function exportBackup() {
 }
 
 /* ================= expose handlers ================= */
-Object.assign(window, { setTab, sessionBtn, cancelLogin, doLogin, doAdminLogin,
-  gotoAdminLogin, gotoUserLogin, changeMyPassword,
+Object.assign(window, { setTab, sessionBtn, signIn, signOut,
   saveCfgInput, clearCfg, createLeague, copyStandings, setViewGw, setStat, clearGw,
   draftPlayer, signPlayer, dropPlayer, editNickname, proposeTrade, actTrade, renderTradeGet,
   sendChat, saveLeague, saveScoring, resetScoring, addManager, renameManager,
-  setManagerField, resetManagerPw, deleteManager, bakeDownload, exportBackup,
+  setManagerField, deleteManager, bakeDownload, exportBackup,
   poolSearch, suggPick, importPool, setupDraft, saveDraftCfg, saveDraftQuota,
   moveOrder, shuffleOrder, startDraft, deleteDraft, makePoolPick, makeCustomPick, cancelPick,
   postRecap, generateSchedule });
