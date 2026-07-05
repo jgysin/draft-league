@@ -78,7 +78,7 @@
   .mgr-name { font-weight: 700; letter-spacing: 1px; text-transform: uppercase; }
   .chat-log { max-height: 420px; overflow-y: auto; border: 1px solid var(--rule);
               background: #fffdf8; padding: 10px 12px; }
-  .chat-msg { margin-bottom: 8px; font-size: 0.85rem; }
+  .chat-msg { margin-bottom: 8px; font-size: 0.85rem; white-space: pre-wrap; }
   .chat-msg .who { font-weight: 700; text-transform: uppercase; font-size: 0.75rem; letter-spacing: 1px; }
   .chat-msg .when { color: var(--faint); font-size: 0.68rem; margin-left: 6px; }
   .trade-card { border-left: 4px solid var(--accent2); }
@@ -201,6 +201,7 @@ let C = {
   chat: [], trades: [], txns: [],
   draft: null,           // meta/draft: {status, order, rounds, quotas, picks}
   pool: null,            // meta/pool: {list:[{n,f,p,c}], count}
+  schedule: null,        // meta/schedule: {"1":["midA|midB",...], ...}
 };
 let ready = { config:false, managers:false, players:false, gameweeks:false };
 let session = null;      // {type:'manager'|'admin', mid?}
@@ -209,7 +210,7 @@ let tab = "standings";
 let viewGw = 1;
 let loginTarget = null;  // mid or 'admin' while PIN prompt shown
 
-function isAdmin() { return session?.type === "admin"; }
+function isAdmin() { return session?.type === "admin" || !!me()?.admin; }
 function me() { return session?.type === "manager"
   ? C.managers.find(m => m.id === session.mid) : null; }
 function mgrById(mid) { return C.managers.find(m => m.id === mid); }
@@ -295,6 +296,131 @@ function enteredGws() {
   return Object.keys(C.gameweeks).map(Number).sort((a, b) => a - b);
 }
 
+/* ================= awards ================= */
+function gwAwards(gw) {
+  if (!C.managers.length || !C.gameweeks[gw]) return null;
+  const rows = C.managers.map(m => ({ m, pts: managerGwPoints(m.id, gw) }));
+  const best = rows.reduce((a, b) => b.pts > a.pts ? b : a);
+  const flop = rows.reduce((a, b) => b.pts < a.pts ? b : a);
+  let top = null;
+  const doc = C.gameweeks[gw];
+  for (const pid of Object.keys(doc.stats || {})) {
+    const pts = statPoints(reg(pid).position, doc.stats[pid]);
+    if (!top || pts > top.pts) top = { pid, pts, owner: doc.owners?.[pid] };
+  }
+  return { best, flop, top };
+}
+function awardsHtml(gw) {
+  const a = gwAwards(gw);
+  if (!a) return "";
+  const topStr = a.top ? `${esc(reg(a.top.pid).nickname || reg(a.top.pid).name)} ${a.top.pts}
+    (${esc(mgrById(a.top.owner)?.name || "free agent")})` : "—";
+  return `<div class="card"><strong>GW ${gw} awards</strong><br>
+    <span class="muted">Manager of the week:</span> ${esc(a.best.m.name)} (${a.best.pts})<br>
+    <span class="muted">Top player:</span> ${topStr}<br>
+    <span class="muted">Wooden spoon:</span> ${esc(a.flop.m.name)} (${a.flop.pts})</div>`;
+}
+
+/* ================= head-to-head ================= */
+function h2hOn() { return !!C.config?.h2h && !!C.schedule; }
+function gwPairs(gw) {
+  return (C.schedule?.[gw] || []).map(s => s.split("|")).filter(p => p[0] && p[1]);
+}
+function h2hTable() {
+  const rows = {};
+  C.managers.forEach(m => rows[m.id] =
+    { m, p: 0, w: 0, d: 0, l: 0, pts: 0, total: managerTotal(m.id) });
+  for (const gw of enteredGws()) {
+    for (const [a, b] of gwPairs(gw)) {
+      if (!rows[a] || !rows[b]) continue;
+      const pa = managerGwPoints(a, gw), pb = managerGwPoints(b, gw);
+      rows[a].p++; rows[b].p++;
+      if (pa > pb) { rows[a].w++; rows[a].pts += 3; rows[b].l++; }
+      else if (pb > pa) { rows[b].w++; rows[b].pts += 3; rows[a].l++; }
+      else { rows[a].d++; rows[b].d++; rows[a].pts++; rows[b].pts++; }
+    }
+  }
+  return Object.values(rows).sort((x, y) => y.pts - x.pts || y.total - x.total);
+}
+function h2hResultsHtml(gw) {
+  const pairs = gwPairs(gw);
+  if (!pairs.length) return "";
+  let html = `<h2>GW ${gw} results</h2>`;
+  for (const [a, b] of pairs) {
+    const pa = managerGwPoints(a, gw), pb = managerGwPoints(b, gw);
+    const an = esc(mgrById(a)?.name || "?"), bn = esc(mgrById(b)?.name || "?");
+    html += `<div class="txn">${pa >= pb ? `<strong>${an}</strong>` : an} ${pa}
+      &mdash; ${pb} ${pb >= pa ? `<strong>${bn}</strong>` : bn}</div>`;
+  }
+  return html;
+}
+function fixturesHtml(gw) {
+  const pairs = gwPairs(gw);
+  if (!pairs.length) return "";
+  let html = `<h2>GW ${gw} fixtures</h2>`;
+  for (const [a, b] of pairs)
+    html += `<div class="txn">${esc(mgrById(a)?.name || "?")} vs ${esc(mgrById(b)?.name || "?")}</div>`;
+  return html;
+}
+function roundPairs(ids, r) {
+  const n = ids.length, rest = ids.slice(1), k = r % (n - 1);
+  const line = [ids[0], ...rest.slice(k), ...rest.slice(0, k)];
+  const pairs = [];
+  for (let i = 0; i < n / 2; i++) pairs.push([line[i], line[n - 1 - i]]);
+  return pairs;
+}
+async function generateSchedule() {
+  if (!isAdmin()) return;
+  if (C.managers.length < 2) { flash("need at least 2 managers"); return; }
+  if (C.schedule && !confirm("Regenerate the whole 38-week schedule? Existing matchups are replaced.")) return;
+  const ids = C.managers.map(m => m.id);
+  if (ids.length % 2) ids.push("");   // bye
+  const sched = {};
+  for (let gw = 1; gw <= 38; gw++)
+    sched[gw] = roundPairs(ids, gw - 1).map(([a, b]) => a + "|" + b);
+  await F.setDoc(F.doc(db, "meta", "schedule"), sched);
+  flash("schedule generated");
+}
+
+/* ================= points chart ================= */
+const PALETTE = ["#e4572e","#2e6fe4","#1f9d55","#8e63ce","#c0392b","#0d8a8a","#b8860b","#4a4a4a"];
+function chartSvg() {
+  const gws = enteredGws();
+  if (gws.length < 2 || !C.managers.length) return "";
+  const series = C.managers.map((m, i) => {
+    let t = 0;
+    return { name: m.name, color: PALETTE[i % PALETTE.length],
+             pts: gws.map(g => t += managerGwPoints(m.id, g)) };
+  });
+  const all = series.flatMap(s => s.pts);
+  const max = Math.max(...all, 1), min = Math.min(...all, 0);
+  const W = 600, H = 220, padL = 38, padR = 10, padT = 10, padB = 24;
+  const x = i => padL + (W - padL - padR) * (gws.length === 1 ? 0 : i / (gws.length - 1));
+  const y = v => padT + (H - padT - padB) * (1 - (v - min) / ((max - min) || 1));
+  let svg = `<h2>Season race</h2>
+  <svg viewBox="0 0 ${W} ${H}" style="width:100%;max-width:700px" xmlns="http://www.w3.org/2000/svg">`;
+  for (const v of [min, Math.round((min + max) / 2), max]) {
+    svg += `<line x1="${padL}" y1="${y(v)}" x2="${W - padR}" y2="${y(v)}"
+      stroke="#d8d2c4" stroke-dasharray="3,4" stroke-width="1"/>
+      <text x="${padL - 6}" y="${y(v) + 4}" text-anchor="end" font-size="10"
+      fill="#8a857c" font-family="inherit">${v}</text>`;
+  }
+  gws.forEach((g, i) => {
+    if (gws.length <= 12 || i % Math.ceil(gws.length / 12) === 0 || i === gws.length - 1)
+      svg += `<text x="${x(i)}" y="${H - 6}" text-anchor="middle" font-size="10"
+        fill="#8a857c" font-family="inherit">${g}</text>`;
+  });
+  for (const s of series) {
+    const pts = s.pts.map((v, i) => `${x(i)},${y(v)}`).join(" ");
+    svg += `<polyline points="${pts}" fill="none" stroke="${s.color}" stroke-width="2"/>`;
+    svg += `<circle cx="${x(s.pts.length - 1)}" cy="${y(s.pts[s.pts.length - 1])}" r="3" fill="${s.color}"/>`;
+  }
+  svg += `</svg><div class="row" style="gap:4px 16px">`;
+  for (const s of series)
+    svg += `<span style="font-size:0.75rem"><span style="color:${s.color}">&#9632;</span> ${esc(s.name)}</span>`;
+  return svg + `</div>`;
+}
+
 /* ================= firestore boot ================= */
 function getConfig() {
   if (EMBEDDED_CONFIG) return EMBEDDED_CONFIG;
@@ -345,6 +471,9 @@ function subscribe() {
     snap => { C.trades = snap.docs.map(d => ({ id: d.id, ...d.data() })); if (tab === "trades") render(); }, connErr);
   F.onSnapshot(F.query(F.collection(db, "txns"), F.orderBy("ts", "desc"), F.limit(40)),
     snap => { C.txns = snap.docs.map(d => d.data()); if (tab === "rosters") render(); }, connErr);
+  F.onSnapshot(F.doc(db, "meta", "schedule"), snap => {
+    C.schedule = snap.exists() ? snap.data() : null; render();
+  }, connErr);
   F.onSnapshot(F.doc(db, "meta", "draft"), snap => {
     C.draft = snap.exists() ? snap.data() : null; render();
   }, connErr);
@@ -375,7 +504,8 @@ function render() {
   const cfg = C.config;
   $("league-name").textContent = cfg?.leagueName || "Draft League";
   document.title = cfg?.leagueName || "Draft League";
-  $("who").textContent = isAdmin() ? "◆ admin" : me() ? "◆ " + me().name : "";
+  $("who").textContent = me() ? "◆ " + me().name + (me().admin ? " (admin)" : "")
+    : session?.type === "admin" ? "◆ commissioner" : "";
   $("session-btn").textContent = session ? "Sign out" : "Sign in";
   if (allReady()) { $("conn").textContent = "● live"; $("conn").classList.add("ok"); }
 
@@ -430,9 +560,9 @@ function clearCfg() { localStorage.removeItem(LS_CFG); location.reload(); }
 function renderCreateLeague() {
   $("main").innerHTML = `<div class="center">
   <h2>Create your league</h2>
-  <p class="muted">Connected to Firebase. Now name the league and set the commissioner (admin) PIN.</p>
+  <p class="muted">Connected to Firebase. Now name the league and set the commissioner password.</p>
   <div class="row"><input id="new-league-name" placeholder="League name" style="width:100%"></div>
-  <div class="row"><input id="new-admin-pin" placeholder="Admin PIN (required)" style="width:100%"></div>
+  <div class="row"><input id="new-admin-pin" placeholder="Commissioner password (required)" style="width:100%"></div>
   <div class="row"><button class="act" onclick="createLeague()">Create league</button></div>
   </div>`;
 }
@@ -450,50 +580,80 @@ async function createLeague() {
 }
 
 /* ================= auth ================= */
+async function sha256(s) {
+  const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(s));
+  return [...new Uint8Array(buf)].map(b => b.toString(16).padStart(2, "0")).join("");
+}
+function usernameOf(m) {
+  return (m.username || m.name || "").toLowerCase().replace(/\s+/g, "");
+}
 function sessionBtn() {
   if (session) {
     session = null; localStorage.removeItem(LS_SESSION); render();
-  } else { loginTarget = ""; render(); }
+  } else { loginTarget = "user"; render(); }
 }
 function renderLogin() {
-  let html = `<div class="center"><h2>Sign in</h2><p class="muted">Who are you?</p><div class="row">`;
-  for (const m of C.managers)
-    html += `<button class="act ghost" onclick="pickLogin('${m.id}')">${esc(m.name)}</button>`;
-  html += `<button class="act ghost" onclick="pickLogin('admin')">Commissioner</button></div>`;
-  if (loginTarget) {
-    const label = loginTarget === "admin" ? "Commissioner" : esc(mgrById(loginTarget)?.name || "");
-    html += `<div class="row" style="margin-top:18px">
-      <span>${label} PIN:</span>
-      <input id="pin-input" type="password" style="width:120px" onkeydown="if(event.key==='Enter')doLogin()">
-      <button class="act" onclick="doLogin()">Enter</button></div>`;
-  }
-  html += `<div class="row"><button class="tiny" onclick="cancelLogin()">cancel</button></div></div>`;
-  $("main").innerHTML = html;
-  const pi = $("pin-input"); if (pi) pi.focus();
-}
-function pickLogin(target) {
-  loginTarget = target;
-  const m = target === "admin" ? null : mgrById(target);
-  if (m && !m.pin) { // no PIN set: walk right in
-    session = { type: "manager", mid: m.id };
-    localStorage.setItem(LS_SESSION, JSON.stringify(session));
-    loginTarget = null; render(); return;
-  }
-  render();
-}
-function cancelLogin() { loginTarget = null; render(); }
-function doLogin() {
-  const pin = $("pin-input").value;
+  let html;
   if (loginTarget === "admin") {
-    if (pin !== C.config.adminPin) { flash("wrong pin"); return; }
-    session = { type: "admin" };
+    html = `<div class="center"><h2>Commissioner sign-in</h2>
+    <p class="muted">Fallback access using the commissioner password from Settings.</p>
+    <div class="row"><input id="admin-pass" type="password" placeholder="Commissioner password"
+      onkeydown="if(event.key==='Enter')doAdminLogin()">
+    <button class="act" onclick="doAdminLogin()">Enter</button></div>
+    <div class="row"><button class="tiny" onclick="gotoUserLogin()">back</button>
+    <button class="tiny" onclick="cancelLogin()">cancel</button></div></div>`;
   } else {
-    const m = mgrById(loginTarget);
-    if (!m || pin !== (m.pin || "")) { flash("wrong pin"); return; }
-    session = { type: "manager", mid: m.id };
+    html = `<div class="center"><h2>Sign in</h2>
+    <div class="row"><input id="login-user" placeholder="Username" style="width:200px"
+      onkeydown="if(event.key==='Enter')document.getElementById('login-pass').focus()"></div>
+    <div class="row"><input id="login-pass" type="password" placeholder="Password" style="width:200px"
+      onkeydown="if(event.key==='Enter')doLogin()"></div>
+    <div class="row"><button class="act" onclick="doLogin()">Sign in</button></div>
+    <p class="muted">First time? Your first sign-in sets your password — pick a good one (4+ characters).</p>
+    <div class="row"><button class="tiny" onclick="gotoAdminLogin()">commissioner sign-in</button>
+    <button class="tiny" onclick="cancelLogin()">cancel</button></div></div>`;
   }
+  $("main").innerHTML = html;
+  const el = $(loginTarget === "admin" ? "admin-pass" : "login-user");
+  if (el) el.focus();
+}
+function gotoAdminLogin() { loginTarget = "admin"; render(); }
+function gotoUserLogin() { loginTarget = "user"; render(); }
+function cancelLogin() { loginTarget = null; render(); }
+function finishLogin(s) {
+  session = s;
   localStorage.setItem(LS_SESSION, JSON.stringify(session));
   loginTarget = null; render();
+}
+async function doLogin() {
+  const u = $("login-user").value.trim().toLowerCase().replace(/\s+/g, "");
+  const p = $("login-pass").value;
+  if (!u) { flash("enter your username"); return; }
+  const m = C.managers.find(x => usernameOf(x) === u);
+  if (!m) { flash("no manager with that username"); return; }
+  if (!m.pw) {
+    if (p.length < 4) { flash("first sign-in sets your password — use 4+ characters"); return; }
+    await F.updateDoc(F.doc(db, "managers", m.id), { pw: await sha256(p) });
+    finishLogin({ type: "manager", mid: m.id });
+    flash("password set — welcome, " + m.name);
+    return;
+  }
+  if (await sha256(p) !== m.pw) { flash("wrong password"); return; }
+  finishLogin({ type: "manager", mid: m.id });
+}
+function doAdminLogin() {
+  const p = $("admin-pass").value;
+  if (p !== C.config.adminPin) { flash("wrong password"); return; }
+  finishLogin({ type: "admin" });
+}
+async function changeMyPassword() {
+  const m = me();
+  if (!m) return;
+  const p = prompt("New password (4+ characters):");
+  if (p === null) return;
+  if (p.length < 4) { flash("too short"); return; }
+  await F.updateDoc(F.doc(db, "managers", m.id), { pw: await sha256(p) });
+  flash("password changed");
 }
 
 /* ================= standings ================= */
@@ -502,17 +662,37 @@ function renderStandings() {
     return `<p class="muted" style="margin-top:20px">No managers yet. Commissioner: sign in and add them in Settings.</p>`;
   const gws = enteredGws();
   const lastGw = gws[gws.length - 1];
-  const rows = C.managers
-    .map(m => ({ m, total: managerTotal(m.id), last: lastGw ? managerGwPoints(m.id, lastGw) : 0 }))
-    .sort((a, b) => b.total - a.total);
-  let html = `<h2>Standings${lastGw ? ` <span class="muted">— through GW ${lastGw}</span>` : ""}</h2>
-  <table><tr><th>#</th><th>Manager</th><th class="num">${lastGw ? "GW " + lastGw : "GW"}</th><th class="num">Total</th></tr>`;
-  rows.forEach((r, i) => {
-    html += `<tr${i === 0 && r.total > 0 ? ' class="leader"' : ""}>
-      <td>${i + 1}</td><td class="mgr-name">${esc(r.m.name)}</td>
-      <td class="num">${fmtPts(r.last)}</td><td class="num"><strong>${r.total}</strong></td></tr>`;
-  });
-  html += `</table>`;
+  let html = "";
+  if (h2hOn()) {
+    const t = h2hTable();
+    html += `<h2>League table${lastGw ? ` <span class="muted">— through GW ${lastGw}</span>` : ""}</h2>
+    <table><tr><th>#</th><th>Manager</th><th class="num">P</th><th class="num">W</th>
+    <th class="num">D</th><th class="num">L</th><th class="num">Pts</th><th class="num">Total</th></tr>`;
+    t.forEach((r, i) => {
+      html += `<tr${i === 0 && r.pts > 0 ? ' class="leader"' : ""}>
+        <td>${i + 1}</td><td class="mgr-name">${esc(r.m.name)}</td>
+        <td class="num">${r.p}</td><td class="num">${r.w}</td><td class="num">${r.d}</td>
+        <td class="num">${r.l}</td><td class="num"><strong>${r.pts}</strong></td>
+        <td class="num">${r.total}</td></tr>`;
+    });
+    html += `</table>`;
+    if (lastGw) html += h2hResultsHtml(lastGw);
+    if (gwPairs((lastGw || 0) + 1).length) html += fixturesHtml((lastGw || 0) + 1);
+  } else {
+    const rows = C.managers
+      .map(m => ({ m, total: managerTotal(m.id), last: lastGw ? managerGwPoints(m.id, lastGw) : 0 }))
+      .sort((a, b) => b.total - a.total);
+    html += `<h2>Standings${lastGw ? ` <span class="muted">— through GW ${lastGw}</span>` : ""}</h2>
+    <table><tr><th>#</th><th>Manager</th><th class="num">${lastGw ? "GW " + lastGw : "GW"}</th><th class="num">Total</th></tr>`;
+    rows.forEach((r, i) => {
+      html += `<tr${i === 0 && r.total > 0 ? ' class="leader"' : ""}>
+        <td>${i + 1}</td><td class="mgr-name">${esc(r.m.name)}</td>
+        <td class="num">${fmtPts(r.last)}</td><td class="num"><strong>${r.total}</strong></td></tr>`;
+    });
+    html += `</table>`;
+  }
+  if (lastGw) html += awardsHtml(lastGw);
+  html += chartSvg();
   const scored = Object.keys(C.players).map(pid => ({ pid, total: playerTotal(pid) }))
     .filter(x => x.total !== 0).sort((a, b) => b.total - a.total).slice(0, 10);
   if (scored.length) {
@@ -531,11 +711,32 @@ function renderStandings() {
 function copyStandings() {
   const gws = enteredGws();
   const lastGw = gws[gws.length - 1];
-  const rows = C.managers.map(m => ({ name: m.name, total: managerTotal(m.id) }))
-    .sort((a, b) => b.total - a.total);
   let txt = `${(C.config.leagueName || "").toUpperCase()}${lastGw ? " — through GW " + lastGw : ""}\n`;
-  rows.forEach((r, i) => { txt += `${i + 1}. ${r.name} — ${r.total} pts\n`; });
+  if (h2hOn()) {
+    h2hTable().forEach((r, i) => {
+      txt += `${i + 1}. ${r.m.name} — ${r.pts}pts (${r.w}-${r.d}-${r.l}), ${r.total} total\n`; });
+  } else {
+    C.managers.map(m => ({ name: m.name, total: managerTotal(m.id) }))
+      .sort((a, b) => b.total - a.total)
+      .forEach((r, i) => { txt += `${i + 1}. ${r.name} — ${r.total} pts\n`; });
+  }
   navigator.clipboard.writeText(txt).then(() => flash("copied"));
+}
+async function postRecap(gw) {
+  if (!isAdmin() || !C.gameweeks[gw]) return;
+  const a = gwAwards(gw);
+  if (!a) return;
+  let lines = [`GW ${gw} RECAP`];
+  lines.push(`Manager of the week: ${a.best.m.name} (${a.best.pts} pts)`);
+  if (a.top) lines.push(`Top player: ${reg(a.top.pid).nickname || reg(a.top.pid).name} ${a.top.pts} pts (${mgrById(a.top.owner)?.name || "free agent"})`);
+  lines.push(`Wooden spoon: ${a.flop.m.name} (${a.flop.pts} pts)`);
+  for (const [x, b] of gwPairs(gw)) {
+    const px = managerGwPoints(x, gw), pb = managerGwPoints(b, gw);
+    lines.push(`${mgrById(x)?.name || "?"} ${px} — ${pb} ${mgrById(b)?.name || "?"}`);
+  }
+  await F.addDoc(F.collection(db, "chat"),
+    { ts: F.serverTimestamp(), name: "recap", text: lines.join("\n") });
+  flash("recap posted to chat");
 }
 
 /* ================= gameweek ================= */
@@ -579,7 +780,9 @@ function renderGameweek() {
     html += `</table></div>`;
   }
   if (canEdit && C.gameweeks[viewGw])
-    html += `<div class="row"><button class="act warn" onclick="clearGw(${viewGw})">Clear GW ${viewGw} data</button></div>`;
+    html += `<div class="row">
+      <button class="act" onclick="postRecap(${viewGw})">Post GW ${viewGw} recap to chat</button>
+      <button class="act warn" onclick="clearGw(${viewGw})">Clear GW ${viewGw} data</button></div>`;
   return html;
 }
 function setViewGw(gw) { viewGw = gw; render(); }
@@ -602,6 +805,7 @@ function renderRosters() {
     return `<p class="muted" style="margin-top:20px">No managers yet.</p>`;
   let html = `<h2>Rosters</h2>`;
   if (!session) html += `<p class="muted">Sign in to manage your squad.</p>`;
+  if (me()) html += `<div class="row"><button class="tiny" onclick="changeMyPassword()">change my password</button></div>`;
   for (const m of C.managers) {
     const mine = canManage(m.id);
     html += `<div class="card"><div class="mgr-name">${esc(m.name)}
@@ -1092,7 +1296,7 @@ function renderSettings() {
   let html = `<h2>League</h2>
   <div class="row">
     <label>Name <input value="${esc(C.config.leagueName)}" onchange="saveLeague('leagueName',this.value)"></label>
-    <label>Admin PIN <input value="${esc(C.config.adminPin)}" onchange="saveLeague('adminPin',this.value.trim())"></label>
+    <label>Commissioner password (fallback) <input value="${esc(C.config.adminPin)}" onchange="saveLeague('adminPin',this.value.trim())"></label>
   </div>
 
   <h2>Scoring</h2>
@@ -1106,12 +1310,17 @@ function renderSettings() {
   html += `</div><div class="row"><button class="act ghost" onclick="resetScoring()">Reset to defaults</button></div>
 
   <h2>Managers</h2>
-  <p class="muted">Each manager signs in with their name + the PIN you set here. No PIN = open door.</p>
-  <table><tr><th>Manager</th><th>PIN</th><th></th></tr>`;
+  <p class="muted">Managers sign in with username + password. Their first sign-in sets their password;
+    "reset" clears it so their next sign-in sets a new one. Admins get full commissioner powers.</p>
+  <table><tr><th>Manager</th><th>Username</th><th>Password</th><th>Admin</th><th></th></tr>`;
   for (const m of C.managers) {
     html += `<tr><td class="mgr-name">${esc(m.name)}</td>
-      <td><input style="width:90px" value="${esc(m.pin || "")}" placeholder="none"
-        onchange="setManagerPin('${m.id}',this.value.trim())"></td>
+      <td><input style="width:110px" value="${esc(usernameOf(m))}"
+        onchange="setManagerField('${m.id}','username',this.value.trim().toLowerCase().replace(/\\s+/g,''))"></td>
+      <td>${m.pw ? `set <button class="tiny del" onclick="resetManagerPw('${m.id}')">reset</button>`
+                 : `<span class="muted">set on first sign-in</span>`}</td>
+      <td><input type="checkbox" ${m.admin ? "checked" : ""}
+        onchange="setManagerField('${m.id}','admin',this.checked)"></td>
       <td><button class="tiny" onclick="renameManager('${m.id}')">rename</button>
           <button class="tiny del" onclick="deleteManager('${m.id}')">delete</button></td></tr>`;
   }
@@ -1120,6 +1329,14 @@ function renderSettings() {
     <input id="new-mgr" placeholder="Manager name" onkeydown="if(event.key==='Enter')addManager()">
     <button class="act" onclick="addManager()">Add manager</button>
   </div>
+
+  <h2>Head-to-head</h2>
+  <p class="muted">Weekly matchups: your GW points vs. one opponent's. Win 3, draw 1, loss 0;
+    total points breaks ties. The standings tab becomes a league table.</p>
+  <div class="row"><label><input type="checkbox" ${C.config.h2h ? "checked" : ""}
+    onchange="saveLeague('h2h',this.checked)"> Enable head-to-head mode</label></div>
+  <div class="row"><button class="act ghost" onclick="generateSchedule()">Generate round-robin schedule</button>
+    <span class="muted">${C.schedule ? "schedule exists — regenerating replaces it" : "38 GWs, everyone plays everyone in rotation"}</span></div>
 
   <h2>Player pool</h2>
   <p class="muted">${C.pool
@@ -1160,8 +1377,13 @@ async function renameManager(mid) {
   const name = prompt("Manager name:", m.name);
   if (name && name.trim()) await F.updateDoc(F.doc(db, "managers", mid), { name: name.trim() });
 }
-async function setManagerPin(mid, pin) {
-  await F.updateDoc(F.doc(db, "managers", mid), { pin }); flash("pin saved");
+async function setManagerField(mid, key, val) {
+  await F.updateDoc(F.doc(db, "managers", mid), { [key]: val }); flash("saved");
+}
+async function resetManagerPw(mid) {
+  const m = mgrById(mid);
+  if (!confirm(`Reset ${m.name}'s password? Their next sign-in sets a new one.`)) return;
+  await F.updateDoc(F.doc(db, "managers", mid), { pw: "" });
 }
 async function deleteManager(mid) {
   const m = mgrById(mid);
@@ -1196,13 +1418,15 @@ function exportBackup() {
 }
 
 /* ================= expose handlers ================= */
-Object.assign(window, { setTab, sessionBtn, pickLogin, cancelLogin, doLogin,
+Object.assign(window, { setTab, sessionBtn, cancelLogin, doLogin, doAdminLogin,
+  gotoAdminLogin, gotoUserLogin, changeMyPassword,
   saveCfgInput, clearCfg, createLeague, copyStandings, setViewGw, setStat, clearGw,
   draftPlayer, signPlayer, dropPlayer, editNickname, proposeTrade, actTrade, renderTradeGet,
   sendChat, saveLeague, saveScoring, resetScoring, addManager, renameManager,
-  setManagerPin, deleteManager, bakeDownload, exportBackup,
+  setManagerField, resetManagerPw, deleteManager, bakeDownload, exportBackup,
   poolSearch, suggPick, importPool, setupDraft, saveDraftCfg, saveDraftQuota,
-  moveOrder, shuffleOrder, startDraft, deleteDraft, makePoolPick, makeCustomPick, cancelPick });
+  moveOrder, shuffleOrder, startDraft, deleteDraft, makePoolPick, makeCustomPick, cancelPick,
+  postRecap, generateSchedule });
 
 boot();
 </script>
