@@ -106,7 +106,44 @@
   .center { max-width: 560px; margin: 40px auto; }
   .conn { font-size: 0.7rem; letter-spacing: 1px; }
   .conn.ok { color: var(--good); }
-  @media (max-width: 600px) { body { padding: 12px 8px 80px; } th, td { padding: 4px 4px; } }
+  /* --- clickable player names --- */
+  .plink { cursor: pointer; border-bottom: 1px dotted var(--accent2); }
+  .plink:hover { background: var(--highlight); }
+  /* --- nav: sticky, scrollable, unread dots --- */
+  nav { position: sticky; top: 0; background: var(--paper); z-index: 5;
+        overflow-x: auto; -webkit-overflow-scrolling: touch; padding: 6px 0;
+        border-bottom: 1px solid var(--rule); flex-wrap: nowrap; }
+  nav button { white-space: nowrap; flex: 0 0 auto; }
+  nav button.has-new::after { content: ""; display: inline-block; width: 6px; height: 6px;
+        border-radius: 50%; background: var(--accent); margin-left: 6px; vertical-align: middle; }
+  /* --- horizontally scrollable wide tables --- */
+  .scroll-x { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  /* --- activity feed --- */
+  .feed-item { border-bottom: 1px dashed var(--rule); padding: 8px 0; font-size: 0.85rem;
+        display: flex; gap: 10px; align-items: flex-start; }
+  .feed-item .tag { flex: 0 0 auto; font-size: 0.6rem; letter-spacing: 1px; text-transform: uppercase;
+        border: 1px solid var(--faint); color: var(--faint); padding: 1px 5px; margin-top: 2px; }
+  .feed-item .tag.move { border-color: var(--accent2); color: var(--accent2); }
+  .feed-item .tag.trade { border-color: var(--accent); color: var(--accent); }
+  .feed-item .tag.recap { border-color: var(--good); color: var(--good); }
+  .feed-item .body { flex: 1; white-space: pre-wrap; }
+  .feed-item .when { color: var(--faint); font-size: 0.68rem; }
+  /* --- waivers --- */
+  .waiver-claim { display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
+        border-bottom: 1px dashed var(--rule); padding: 5px 0; font-size: 0.82rem; }
+  /* --- player modal --- */
+  .modal-back { position: fixed; inset: 0; background: rgba(28,27,26,0.55); z-index: 20;
+        display: flex; align-items: flex-start; justify-content: center; padding: 40px 12px; overflow-y: auto; }
+  .modal { background: var(--paper); border: 2px solid var(--ink); max-width: 480px; width: 100%;
+        padding: 18px 20px; box-shadow: 6px 6px 0 var(--ink); }
+  .modal .modal-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; }
+  .modal .modal-close { font: inherit; background: none; border: 1px solid var(--ink); cursor: pointer;
+        padding: 2px 9px; line-height: 1; }
+  @media (max-width: 600px) {
+    body { padding: 12px 8px 80px; } th, td { padding: 4px 4px; }
+    nav button { padding: 9px 12px; font-size: 0.75rem; }
+    button.tiny { padding: 4px 6px; font-size: 0.75rem; }
+  }
 </style>
 </head>
 <body>
@@ -128,11 +165,13 @@
   <button data-tab="rosters" onclick="setTab('rosters')">Rosters</button>
   <button data-tab="draft" onclick="setTab('draft')">Draft</button>
   <button data-tab="trades" onclick="setTab('trades')">Trades</button>
+  <button data-tab="feed" onclick="setTab('feed')">Feed</button>
   <button data-tab="chat" onclick="setTab('chat')">Chat</button>
   <button data-tab="settings" onclick="setTab('settings')">Settings</button>
 </nav>
 
 <main id="main"><p class="muted" style="margin-top:30px">loading&hellip;</p></main>
+<div id="modal-root"></div>
 <div class="flash" id="flash"></div>
 
 <script type="module">
@@ -189,6 +228,9 @@ function fmtWhen(ts) {
   return d.toLocaleDateString(undefined, { month:"short", day:"numeric" }) + " " +
          d.toLocaleTimeString(undefined, { hour:"2-digit", minute:"2-digit" });
 }
+function tsMs(ts) { return ts?.toMillis ? ts.toMillis() : (ts?.seconds ? ts.seconds * 1000 : 0); }
+/* wrap player content so a click opens the stats modal */
+function plink(pid, inner) { return `<span class="plink" onclick="openPlayer('${pid}')">${inner}</span>`; }
 
 /* ================= state cache ================= */
 let F = null, db = null;                  // firestore module + instance
@@ -201,6 +243,7 @@ let C = {
   managers: [],          // [{id, name, email, admin, roster:[pid]}]
   gameweeks: {},         // gw -> {stats:{pid:{}}, owners:{pid:mid}}
   chat: [], trades: [], txns: [],
+  waivers: [],           // waivers/{auto}: {ts, mid, pid, drop, status}
   draft: null,           // meta/draft: {status, order, rounds, quotas, picks}
   pool: null,            // meta/pool: {list:[{n,f,p,c}], count}
   schedule: null,        // meta/schedule: {"1":["midA|midB",...], ...}
@@ -209,6 +252,8 @@ let ready = { config:false, managers:false, players:false, gameweeks:false };
 let session = null;      // computed: {type:'manager',mid} | {type:'admin'} | {type:'orphan',email} | null
 let tab = "standings";
 let viewGw = 1;
+let feedSeen = +localStorage.getItem("dl-feed-seen") || 0;   // ms of newest feed item last viewed
+let chatSeen = +localStorage.getItem("dl-chat-seen") || 0;   // ms of newest chat msg last viewed
 
 function emailEq(a, b) { return !!a && !!b && a.toLowerCase() === b.toLowerCase(); }
 function computeSession() {
@@ -233,9 +278,10 @@ function freeAgents() {
 }
 function displayName(pid) {
   const p = reg(pid);
-  return p.nickname
+  const inner = p.nickname
     ? `<span class="nick">${esc(p.nickname)}</span> <span class="real">(${esc(p.name)})</span>`
     : `<span class="nick">${esc(p.name)}</span>`;
+  return plink(pid, inner);
 }
 function posTag(pid) {
   const p = reg(pid);
@@ -483,8 +529,10 @@ function subscribe() {
     snap => { C.chat = snap.docs.map(d => d.data()); if (tab === "chat") render(); }, connErr);
   F.onSnapshot(F.query(F.collection(db, "trades"), F.orderBy("ts", "desc"), F.limit(40)),
     snap => { C.trades = snap.docs.map(d => ({ id: d.id, ...d.data() })); if (tab === "trades") render(); }, connErr);
-  F.onSnapshot(F.query(F.collection(db, "txns"), F.orderBy("ts", "desc"), F.limit(40)),
-    snap => { C.txns = snap.docs.map(d => d.data()); if (tab === "rosters") render(); }, connErr);
+  F.onSnapshot(F.query(F.collection(db, "txns"), F.orderBy("ts", "desc"), F.limit(60)),
+    snap => { C.txns = snap.docs.map(d => d.data()); if (tab === "rosters" || tab === "feed") render(); }, connErr);
+  F.onSnapshot(F.query(F.collection(db, "waivers"), F.orderBy("ts", "asc")),
+    snap => { C.waivers = snap.docs.map(d => ({ id: d.id, ...d.data() })); if (tab === "rosters") render(); }, connErr);
   F.onSnapshot(F.doc(db, "meta", "schedule"), snap => {
     C.schedule = snap.exists() ? snap.data() : null; render();
   }, connErr);
@@ -533,9 +581,21 @@ function render() {
   document.querySelectorAll("nav button").forEach(b =>
     b.classList.toggle("active", b.dataset.tab === tab));
   const views = { standings: renderStandings, gameweek: renderGameweek, rosters: renderRosters,
-                  draft: renderDraft, trades: renderTrades, chat: renderChat, settings: renderSettings };
+                  draft: renderDraft, trades: renderTrades, feed: renderFeed,
+                  chat: renderChat, settings: renderSettings };
   $("main").innerHTML = views[tab]();
   if (tab === "chat") { const el = $("chat-log"); if (el) el.scrollTop = el.scrollHeight; }
+  if (tab === "feed") { feedSeen = latestFeedMs(); localStorage.setItem("dl-feed-seen", feedSeen); }
+  if (tab === "chat") { chatSeen = latestChatMs(); localStorage.setItem("dl-chat-seen", chatSeen); }
+  updateBadges();
+}
+function latestFeedMs() { return feedItems().reduce((m, x) => Math.max(m, x.ms), 0); }
+function latestChatMs() { return (C.chat || []).reduce((m, c) => Math.max(m, tsMs(c.ts)), 0); }
+function updateBadges() {
+  const fb = document.querySelector('nav button[data-tab="feed"]');
+  if (fb) fb.classList.toggle("has-new", latestFeedMs() > feedSeen);
+  const cb = document.querySelector('nav button[data-tab="chat"]');
+  if (cb) cb.classList.toggle("has-new", latestChatMs() > chatSeen);
 }
 
 /* ================= connect / setup screens ================= */
@@ -721,7 +781,7 @@ function renderGameweek() {
       if (doc.owners[pid] === m.id) pids.add(pid);
     html += `<div class="card"><div class="mgr-name">${esc(m.name)}
       <span class="muted" style="text-transform:none">— GW pts: ${fmtPts(managerGwPoints(m.id, viewGw))}</span></div>
-    <table class="gw-table"><tr><th>Player</th>${STAT_COLS.map(c => `<th class="num" title="${c.title}">${c.label}</th>`).join("")}<th class="num">Pts</th></tr>`;
+    <div class="scroll-x"><table class="gw-table"><tr><th>Player</th>${STAT_COLS.map(c => `<th class="num" title="${c.title}">${c.label}</th>`).join("")}<th class="num">Pts</th></tr>`;
     for (const pid of pids) {
       const s = (doc.stats || {})[pid] || {};
       const moved = doc.owners?.[pid] === m.id && !(m.roster || []).includes(pid);
@@ -738,7 +798,7 @@ function renderGameweek() {
       html += `<td class="num">${fmtPts(statPoints(reg(pid).position, s))}</td></tr>`;
     }
     if (!pids.size) html += `<tr><td colspan="9" class="muted">no players</td></tr>`;
-    html += `</table></div>`;
+    html += `</table></div></div>`;
   }
   if (canEdit && C.gameweeks[viewGw])
     html += `<div class="row">
@@ -776,7 +836,7 @@ function renderRosters() {
       const nickCell = mine
         ? `<button class="tiny" onclick="editNickname('${pid}')">${p.nickname ? esc(p.nickname) : "+ nickname"}</button>`
         : (p.nickname ? esc(p.nickname) : `<span class="muted">—</span>`);
-      html += `<tr><td>${headshot(pid)}${posTag(pid)}${esc(p.name)}</td><td>${nickCell}</td>
+      html += `<tr><td>${headshot(pid)}${posTag(pid)}${plink(pid, esc(p.name))}</td><td>${nickCell}</td>
         <td class="num">${fmtPts(playerTotal(pid))}</td>
         <td>${mine ? `<button class="tiny del" onclick="dropPlayer('${m.id}','${pid}')">drop</button>` : ""}</td></tr>`;
     }
@@ -800,19 +860,66 @@ function renderRosters() {
   const fas = freeAgents().map(pid => ({ pid, total: playerTotal(pid) }))
     .sort((a, b) => b.total - a.total);
   html += `<h2>Free agents</h2>`;
+  if (waiverMode())
+    html += `<p class="muted">Waiver mode is on — managers submit claims; the commissioner processes them
+      by priority (worst record first). The commissioner can still sign directly.</p>`;
   if (!fas.length) html += `<p class="muted">Nobody in the pool. Dropped players land here (with their stats).</p>`;
   else {
-    html += `<table><tr><th>Player</th><th class="num">Pts</th><th></th></tr>`;
+    html += `<div class="scroll-x"><table><tr><th>Player</th><th class="num">Pts</th><th></th></tr>`;
     for (const x of fas) {
       let signBtn = "";
-      if (me()) signBtn = `<button class="tiny" onclick="signPlayer('${me().id}','${x.pid}')">sign</button>`;
-      else if (isAdmin()) signBtn = `<select id="signto-${x.pid}" style="font-size:0.7rem">
+      if (me() && waiverMode()) {
+        const claimed = C.waivers.some(w => w.status === "pending" && w.mid === me().id && w.pid === x.pid);
+        signBtn = claimed
+          ? `<span class="muted">claimed</span>`
+          : `<button class="tiny" onclick="submitWaiver('${me().id}','${x.pid}')">claim</button>`;
+      } else if (me()) {
+        signBtn = `<button class="tiny" onclick="signPlayer('${me().id}','${x.pid}')">sign</button>`;
+      } else if (isAdmin()) {
+        signBtn = `<select id="signto-${x.pid}" style="font-size:0.7rem">
           ${C.managers.map(m => `<option value="${m.id}">${esc(m.name)}</option>`).join("")}</select>
         <button class="tiny" onclick="signPlayer(document.getElementById('signto-${x.pid}').value,'${x.pid}')">sign</button>`;
+      }
       html += `<tr><td>${headshot(x.pid)}${posTag(x.pid)}${displayName(x.pid)}</td>
         <td class="num">${fmtPts(x.total)}</td><td>${signBtn}</td></tr>`;
     }
-    html += `</table>`;
+    html += `</table></div>`;
+  }
+  /* waivers */
+  if (waiverMode()) {
+    if (me()) {
+      const mine = myPendingWaivers(me().id);
+      html += `<h2>My waiver claims</h2>`;
+      if (!mine.length) html += `<p class="muted">No pending claims. Hit "claim" on a free agent above.</p>`;
+      else for (const w of mine) {
+        const dropOpts = `<option value="">— drop nobody —</option>` +
+          sortRoster(me().roster).map(pid =>
+            `<option value="${pid}"${w.drop === pid ? " selected" : ""}>${esc(reg(pid).nickname || reg(pid).name)}</option>`).join("");
+        html += `<div class="waiver-claim">
+          <span>${headshot(w.pid)}${posTag(w.pid)}${esc(reg(w.pid).name)}</span>
+          <label class="muted">if won, drop:
+            <select onchange="setWaiverDrop('${w.id}', this.value)">${dropOpts}</select></label>
+          <button class="tiny del" onclick="cancelWaiver('${w.id}')">withdraw</button></div>`;
+      }
+    }
+    if (isAdmin()) {
+      const pending = C.waivers.filter(w => w.status === "pending");
+      html += `<h2>Pending claims (commissioner)</h2>`;
+      if (!pending.length) html += `<p class="muted">No claims waiting.</p>`;
+      else {
+        html += `<p class="muted">Priority order (worst record first): ${waiverOrder().map(m => esc(m.name)).join(" → ")}</p>
+          <div class="scroll-x"><table><tr><th>Manager</th><th>Claims</th><th>Drops</th></tr>`;
+        for (const m of waiverOrder()) {
+          const claims = pending.filter(w => w.mid === m.id);
+          if (!claims.length) continue;
+          html += `<tr><td class="mgr-name">${esc(m.name)}</td>
+            <td>${claims.map(w => esc(reg(w.pid).name)).join(", ")}</td>
+            <td>${claims.map(w => w.drop ? esc(reg(w.drop).name) : "—").join(", ")}</td></tr>`;
+        }
+        html += `</table></div>
+          <div class="row"><button class="act" onclick="processWaivers()">Process ${pending.length} claim(s)</button></div>`;
+      }
+    }
   }
   /* transaction log */
   if (C.txns.length) {
@@ -1299,6 +1406,13 @@ function renderSettings() {
   <div class="row"><button class="act ghost" onclick="generateSchedule()">Generate round-robin schedule</button>
     <span class="muted">${C.schedule ? "schedule exists — regenerating replaces it" : "38 GWs, everyone plays everyone in rotation"}</span></div>
 
+  <h2>Waivers</h2>
+  <p class="muted">With waivers on, managers can't instantly grab free agents — they submit claims, and you
+    process them from the Rosters tab. Ties go to the manager with the worst record (waiver priority).
+    With it off, free agents are first-come, first-served.</p>
+  <div class="row"><label><input type="checkbox" ${C.config.waivers ? "checked" : ""}
+    onchange="saveLeague('waivers',this.checked)"> Enable waiver claims</label></div>
+
   <h2>Player pool</h2>
   <p class="muted">${C.pool
     ? `<strong>${C.pool.count} players loaded</strong> (updated ${fmtWhen(C.pool.updated) || "just now"}). Re-import after transfer windows to refresh.`
@@ -1373,8 +1487,161 @@ function exportBackup() {
   a.click(); URL.revokeObjectURL(a.href);
 }
 
+/* ================= activity feed ================= */
+function feedItems() {
+  const items = [];
+  for (const t of C.txns) {
+    if (/^Trade:/.test(t.text)) continue; // accepted trades are shown from the trades collection
+    items.push({ ms: tsMs(t.ts), ts: t.ts, kind: "move", text: t.text });
+  }
+  for (const tr of C.trades) {
+    const from = mgrById(tr.from)?.name || "?", to = mgrById(tr.to)?.name || "?";
+    const verb = tr.status === "accepted" ? "trade completed"
+      : tr.status === "rejected" ? "trade rejected"
+      : tr.status === "cancelled" ? "trade cancelled"
+      : tr.status === "vetoed" ? "trade vetoed by commissioner"
+      : tr.status === "void" ? "trade voided (a player had moved)"
+      : "trade proposed";
+    const give = (tr.give || []).map(pid => reg(pid).nickname || reg(pid).name).join(", ") || "—";
+    const get  = (tr.get  || []).map(pid => reg(pid).nickname || reg(pid).name).join(", ") || "—";
+    items.push({ ms: tsMs(tr.ts), ts: tr.ts, kind: "trade",
+      text: `${from} ↔ ${to}: ${verb}\n${from} gives ${give} · gets ${get}` });
+  }
+  for (const c of C.chat)
+    if (c.name === "recap")
+      items.push({ ms: tsMs(c.ts), ts: c.ts, kind: "recap", text: c.text });
+  return items.sort((a, b) => b.ms - a.ms);
+}
+function renderFeed() {
+  const items = feedItems();
+  let html = `<h2>Activity feed</h2>
+    <p class="muted">Roster moves, trades, and gameweek recaps — newest first.</p>`;
+  if (!items.length) return html + `<p class="muted" style="margin-top:14px">Nothing has happened yet.</p>`;
+  for (const it of items)
+    html += `<div class="feed-item"><span class="tag ${it.kind}">${it.kind}</span>
+      <div class="body">${esc(it.text)}<div class="when">${fmtWhen(it.ts)}</div></div></div>`;
+  return html;
+}
+
+/* ================= player stats modal ================= */
+function playerGwSeries(pid) {
+  const pos = reg(pid).position;
+  return enteredGws().map(gw => ({
+    gw, pts: statPoints(pos, (C.gameweeks[gw]?.stats || {})[pid]),
+    owner: C.gameweeks[gw]?.owners?.[pid] || null,
+  }));
+}
+function sparkline(series) {
+  if (series.length < 2) return "";
+  const vals = series.map(s => s.pts);
+  const min = Math.min(0, ...vals), max = Math.max(1, ...vals);
+  const W = 260, H = 60, pad = 4;
+  const x = i => pad + i * (W - 2 * pad) / (series.length - 1);
+  const y = v => H - pad - (v - min) / (max - min) * (H - 2 * pad);
+  const pts = series.map((s, i) => `${x(i).toFixed(1)},${y(s.pts).toFixed(1)}`).join(" ");
+  const zero = y(0).toFixed(1);
+  return `<svg viewBox="0 0 ${W} ${H}" width="100%" height="${H}" style="margin:8px 0">
+    <line x1="0" y1="${zero}" x2="${W}" y2="${zero}" stroke="var(--rule)" stroke-width="1"/>
+    <polyline points="${pts}" fill="none" stroke="var(--accent)" stroke-width="2"/>
+    ${series.map((s, i) => `<circle cx="${x(i).toFixed(1)}" cy="${y(s.pts).toFixed(1)}" r="2.5" fill="var(--ink)"/>`).join("")}
+  </svg>`;
+}
+function openPlayer(pid) {
+  const p = reg(pid);
+  const series = playerGwSeries(pid);
+  const total = playerTotal(pid);
+  const owner = ownerOf(pid);
+  const played = series.filter(s => (C.gameweeks[s.gw]?.stats?.[pid]?.played)).length;
+  const best = series.reduce((a, b) => b.pts > (a?.pts ?? -1e9) ? b : a, null);
+  let rows = series.filter(s => (C.gameweeks[s.gw]?.stats || {})[pid])
+    .map(s => `<tr><td>GW ${s.gw}</td>
+      <td>${s.owner ? esc(mgrById(s.owner)?.name || "free agent") : '<span class="muted">—</span>'}</td>
+      <td class="num">${fmtPts(s.pts)}</td></tr>`).join("");
+  if (!rows) rows = `<tr><td colspan="3" class="muted">No gameweek stats entered yet.</td></tr>`;
+  const body = `<div class="modal-head">
+      <div><div class="mgr-name">${esc(p.nickname || p.name)}</div>
+        ${p.nickname ? `<div class="real">${esc(p.name)}</div>` : ""}
+        <div class="muted" style="text-transform:none">${p.position}${p.club ? " · " + p.club : ""} ·
+          ${owner ? "owned by " + esc(owner.name) : "free agent"}</div></div>
+      <button class="modal-close" onclick="closeModal()">✕</button></div>
+    <div class="row" style="gap:18px;margin:10px 0">
+      <div><div class="muted">Season pts</div><strong style="font-size:1.2rem">${total}</strong></div>
+      <div><div class="muted">Apps</div><strong style="font-size:1.2rem">${played}</strong></div>
+      <div><div class="muted">Best GW</div><strong style="font-size:1.2rem">${best ? best.pts : 0}</strong></div>
+    </div>
+    ${sparkline(series)}
+    <table><tr><th>Gameweek</th><th>Owner</th><th class="num">Pts</th></tr>${rows}</table>`;
+  $("modal-root").innerHTML = `<div class="modal-back" onclick="if(event.target===this)closeModal()">
+    <div class="modal">${body}</div></div>`;
+}
+function closeModal() { $("modal-root").innerHTML = ""; }
+
+/* ================= waivers ================= */
+function waiverMode() { return !!C.config?.waivers; }
+function waiverOrder() {
+  /* priority = worst record first (lowest total points) */
+  return [...C.managers].sort((a, b) => managerTotal(a.id) - managerTotal(b.id));
+}
+function myPendingWaivers(mid) {
+  return C.waivers.filter(w => w.status === "pending" && w.mid === mid);
+}
+async function submitWaiver(mid, pid) {
+  if (!canManage(mid)) return;
+  if (draftLive()) { flash("locked during the draft"); return; }
+  if (ownerOf(pid)) { flash("already rostered"); return; }
+  if (C.waivers.some(w => w.status === "pending" && w.mid === mid && w.pid === pid)) {
+    flash("you already claimed this player"); return; }
+  await F.addDoc(F.collection(db, "waivers"),
+    { ts: F.serverTimestamp(), mid, pid, drop: null, status: "pending" });
+  flash("waiver claim submitted");
+}
+async function setWaiverDrop(wid, drop) {
+  await F.updateDoc(F.doc(db, "waivers", wid), { drop: drop || null });
+  flash("claim updated");
+}
+async function cancelWaiver(wid) {
+  await F.deleteDoc(F.doc(db, "waivers", wid));
+  flash("claim withdrawn");
+}
+async function processWaivers() {
+  if (!isAdmin()) return;
+  const pending = C.waivers.filter(w => w.status === "pending");
+  if (!pending.length) { flash("no pending claims"); return; }
+  if (!confirm(`Process ${pending.length} waiver claim(s)? Priority is worst record first; ` +
+    `if two managers want the same player, the higher-priority one wins.`)) return;
+  const order = waiverOrder();
+  const rostered = new Set(C.managers.flatMap(m => m.roster || []));
+  const rosters = {}; C.managers.forEach(m => rosters[m.id] = [...(m.roster || [])]);
+  const granted = new Set();
+  const changed = new Set();
+  const results = [];
+  for (const m of order) {
+    const claims = pending.filter(w => w.mid === m.id).sort((a, b) => tsMs(a.ts) - tsMs(b.ts));
+    for (const w of claims) {
+      if (granted.has(w.pid) || rostered.has(w.pid)) continue; // already taken
+      granted.add(w.pid);
+      let r = rosters[m.id];
+      if (w.drop) r = r.filter(x => x !== w.drop);
+      r.push(w.pid);
+      rosters[m.id] = r; changed.add(m.id);
+      results.push({ mid: m.id, pid: w.pid, drop: w.drop });
+    }
+  }
+  for (const mid of changed)
+    await F.updateDoc(F.doc(db, "managers", mid), { roster: rosters[mid] });
+  for (const w of pending)
+    await F.deleteDoc(F.doc(db, "waivers", w.id));
+  for (const r of results) {
+    const mn = mgrById(r.mid)?.name || "?";
+    const dropStr = r.drop ? `, dropped ${reg(r.drop).name}` : "";
+    await logTxn(`${mn} won waiver claim: ${reg(r.pid).name} (${reg(r.pid).position})${dropStr}`);
+  }
+  flash(`${results.length} claim(s) granted`);
+}
+
 /* ================= expose handlers ================= */
 Object.assign(window, { setTab, sessionBtn, signIn, signOut,
+  openPlayer, closeModal, submitWaiver, setWaiverDrop, cancelWaiver, processWaivers,
   saveCfgInput, clearCfg, createLeague, copyStandings, setViewGw, setStat, clearGw,
   draftPlayer, signPlayer, dropPlayer, editNickname, proposeTrade, actTrade, renderTradeGet,
   sendChat, saveLeague, saveScoring, resetScoring, addManager, renameManager,
@@ -1383,7 +1650,10 @@ Object.assign(window, { setTab, sessionBtn, signIn, signOut,
   moveOrder, shuffleOrder, startDraft, deleteDraft, makePoolPick, makeCustomPick, cancelPick,
   postRecap, generateSchedule });
 
+document.addEventListener("keydown", e => { if (e.key === "Escape") closeModal(); });
+
 boot();
 </script>
 </body>
 </html>
+
