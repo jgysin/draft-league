@@ -157,6 +157,9 @@ describe("FPL sync and scoring", () => {
     await tick(db, fakeFpl({ 1: gw1 }, [1]), new Date("2026-08-20T12:00:00Z"));
     s = (await db.doc(`leagues/${leagueId}/meta/standings`).get()).data()!;
     expect(s.totals).toEqual({ [a]: 9, [b]: 5 });
+    const catalog = (await db.doc("fpl/catalog").get()).data()!;
+    expect(catalog.players).toHaveLength(6);
+    expect(catalog.players).toContainEqual({ c: "1003", n: "Saka", f: "Bukayo Saka", p: "MID", t: "ARS", s: "d" });
     const cur = (await db.doc("fpl/current").get()).data()!;
     expect(cur.finalized).toEqual([1]);
 

@@ -27,6 +27,7 @@ between seasons, and the official headshot URLs use them.
 | --- | --- | --- |
 | `players/{code}` | sync | name, full name, position, club, availability status and news |
 | `fpl/current` | sync | season, gameweek deadlines, element id → code map |
+| `fpl/catalog` | sync | every player in one doc (`{c, n, f, p, t, s}`) so the app loads the pool in one read |
 | `seasons/{season}/gameweeks/{gw}` | sync | `stats: {code: {apps, minutes, goals, assists, cs, yc, rc, og}}`, `final` |
 | `inviteCodes/{code}` | functions | `{leagueId}`; not readable by clients |
 | `leagues/{id}` | functions | name, season, inviteCode, memberUids, scoring, h2h, waivers, bankedGw |

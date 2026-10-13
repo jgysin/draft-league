@@ -39,6 +39,12 @@ export async function tick(db: Firestore, fetchJson: FetchJson = fetchFpl, now =
       for (const p of boot.players.slice(i, i + 400)) batch.set(db.collection("players").doc(p.code), p);
       await batch.commit();
     }
+    // One compact doc with every player, so the app loads the whole pool in a single read.
+    await db.collection("fpl").doc("catalog").set({
+      season,
+      players: boot.players.map(p => ({ c: p.code, n: p.name, f: p.fullName, p: p.position, t: p.club, s: p.status })),
+      updatedAt: FieldValue.serverTimestamp(),
+    });
     logger.info(`synced ${boot.players.length} players for ${season}`);
   }
 
