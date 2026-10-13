@@ -1,0 +1,59 @@
+rules_version = '2';
+
+// All league writes go through Cloud Functions (backend/functions), which run
+// with admin access and enforce turn order, roster rules and permissions.
+// Clients only read, plus post chat messages and keep their own profile.
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() { return request.auth != null; }
+
+    // ---- Legacy website (utter-woke-nonsense.com) ----------------------------
+    // The single-file app still reads and writes these root collections openly.
+    // Delete this block once everyone has moved to the app.
+    match /meta/{doc}        { allow read, write: if true; }
+    match /managers/{id}     { allow read, write: if true; }
+    match /gameweeks/{id}    { allow read, write: if true; }
+    match /chat/{id}         { allow read, write: if true; }
+    match /trades/{id}       { allow read, write: if true; }
+    match /txns/{id}         { allow read, write: if true; }
+    match /waivers/{id}      { allow read, write: if true; }
+    // --------------------------------------------------------------------------
+
+    // Shared FPL data, written only by the sync job.
+    match /players/{code}                  { allow read: if signedIn(); }
+    match /fpl/{doc}                       { allow read: if signedIn(); }
+    match /seasons/{season}/gameweeks/{gw} { allow read: if signedIn(); }
+
+    match /users/{uid} {
+      allow read: if signedIn() && request.auth.uid == uid;
+      allow write: if signedIn() && request.auth.uid == uid
+        && request.resource.data.keys().hasOnly(['displayName', 'pushTokens', 'updatedAt']);
+    }
+
+    match /leagues/{leagueId} {
+      function isMember() {
+        return signedIn() && request.auth.uid in
+          get(/databases/$(database)/documents/leagues/$(leagueId)).data.memberUids;
+      }
+
+      // `list` works because the app queries memberUids array-contains its uid.
+      allow read: if signedIn() && request.auth.uid in resource.data.memberUids;
+
+      match /chat/{msgId} {
+        allow read: if isMember();
+        allow create: if isMember()
+          && request.resource.data.keys().hasOnly(['uid', 'memberId', 'text', 'ts'])
+          && request.resource.data.uid == request.auth.uid
+          && get(/databases/$(database)/documents/leagues/$(leagueId)/members/$(request.resource.data.memberId)).data.uid == request.auth.uid
+          && request.resource.data.text is string
+          && request.resource.data.text.size() > 0
+          && request.resource.data.text.size() <= 1000
+          && request.resource.data.ts == request.time;
+      }
+
+      match /{collection}/{docId} {
+        allow read: if collection != 'chat' && isMember();
+      }
+    }
+  }
+}
