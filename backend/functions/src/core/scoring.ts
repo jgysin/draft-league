@@ -23,14 +23,18 @@ export interface GwInput {
   gw: number;
   owners: Record<string, string>;                       // playerId -> memberId
   stats: Record<string, Partial<PlayerGwStats>>;        // playerId -> stats
+  final: boolean;                                       // FPL has finished checking this gameweek's stats
 }
 
 export interface Standings {
   /** gw -> memberId -> points */
   gwPoints: Record<string, Record<string, number>>;
   totals: Record<string, number>;
+  /** Counts final gameweeks only, so a match isn't won or lost on half-played fixtures. */
   h2h: H2hRow[] | null;
   awards: Record<string, Awards>;
+  /** Gameweeks included above whose stats are still provisional. */
+  liveGw: number[];
 }
 
 export interface H2hRow { memberId: string; p: number; w: number; d: number; l: number; pts: number; total: number }
@@ -55,8 +59,10 @@ export function computeStandings(opts: {
   const gwPoints: Standings["gwPoints"] = {};
   const totals: Record<string, number> = Object.fromEntries(memberIds.map(m => [m, 0]));
   const awards: Standings["awards"] = {};
+  const liveGw: number[] = [];
 
-  for (const { gw, owners, stats } of [...gameweeks].sort((a, b) => a.gw - b.gw)) {
+  for (const { gw, owners, stats, final } of [...gameweeks].sort((a, b) => a.gw - b.gw)) {
+    if (!final) liveGw.push(gw);
     const pts: Record<string, number> = Object.fromEntries(memberIds.map(m => [m, 0]));
     let top: Awards["top"] = null;
     for (const [pid, s] of Object.entries(stats)) {
@@ -84,6 +90,7 @@ export function computeStandings(opts: {
     const rows: Record<string, H2hRow> = Object.fromEntries(memberIds.map(m =>
       [m, { memberId: m, p: 0, w: 0, d: 0, l: 0, pts: 0, total: totals[m] }]));
     for (const gw of Object.keys(gwPoints)) {
+      if (liveGw.includes(Number(gw))) continue;
       for (const [a, b] of schedule[gw] || []) {
         if (!rows[a] || !rows[b]) continue;
         const pa = gwPoints[gw][a], pb = gwPoints[gw][b];
@@ -96,5 +103,5 @@ export function computeStandings(opts: {
     h2h = Object.values(rows).sort((x, y) => y.pts - x.pts || y.total - x.total);
   }
 
-  return { gwPoints, totals, h2h, awards };
+  return { gwPoints, totals, h2h, awards, liveGw };
 }

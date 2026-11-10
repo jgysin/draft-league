@@ -1,9 +1,10 @@
 /** Pure league rules shared by the callables and (later) the app. */
+import { randomInt } from "node:crypto";
 import { DraftState, Position } from "./types";
 
 /** Who is on the clock for pick index `n` (0-based) in a snake draft. */
 export function snakePick(order: string[], n: number): { round: number; memberId: string } {
-  const size = order.length;
+  const size = order.length || 1;   // an empty order yields an undefined memberId, not NaN indexes
   const round = Math.floor(n / size);
   const i = n % size;
   return { round, memberId: round % 2 === 0 ? order[i] : order[size - 1 - i] };
@@ -42,12 +43,14 @@ export function roundRobin(memberIds: string[], gameweeks = 38): Record<string, 
 /**
  * Resolve pending waiver claims. Priority goes to the member with the fewest
  * points; within one member, claims run oldest first. A claim fails if the
- * player is already taken or its drop player is no longer on the roster.
+ * player is already taken, its drop player is no longer on the roster, or it
+ * has no drop and the roster is already at `rosterLimit` (0 = unlimited).
  */
 export function resolveWaivers(opts: {
   claims: { id: string; memberId: string; playerId: string; drop: string | null; tsMs: number }[];
   rosters: Record<string, string[]>;
   totals: Record<string, number>;
+  rosterLimit?: number;
 }): { rosters: Record<string, string[]>; granted: { id: string; memberId: string; playerId: string; drop: string | null }[] } {
   const rosters = Object.fromEntries(Object.entries(opts.rosters).map(([k, v]) => [k, [...v]]));
   const taken = new Set(Object.values(rosters).flat());
@@ -59,6 +62,7 @@ export function resolveWaivers(opts: {
     for (const c of mine) {
       if (taken.has(c.playerId)) continue;
       if (c.drop && !rosters[mid].includes(c.drop)) continue;
+      if (opts.rosterLimit && !c.drop && rosters[mid].length >= opts.rosterLimit) continue;
       if (c.drop) { rosters[mid] = rosters[mid].filter(p => p !== c.drop); taken.delete(c.drop); }
       rosters[mid].push(c.playerId);
       taken.add(c.playerId);
@@ -69,13 +73,16 @@ export function resolveWaivers(opts: {
 }
 
 const INVITE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";   // no 0/O, 1/I
-export function newInviteCode(rand: () => number = Math.random): string {
+/** Join codes are the only secret between a stranger and a league, so they come from the CSPRNG. */
+export function newInviteCode(length = 8): string {
   let s = "";
-  for (let i = 0; i < 6; i++) s += INVITE_ALPHABET[Math.floor(rand() * INVITE_ALPHABET.length)];
+  for (let i = 0; i < length; i++) s += INVITE_ALPHABET[randomInt(INVITE_ALPHABET.length)];
   return s;
 }
+/** What a typed code must look like (older leagues have 6-character codes). */
+export const INVITE_CODE_RE = /^[A-Z2-9]{6,10}$/;
 
-/** FPL season label for a date: seasons roll over on 1 July. */
+/** FPL season label for a date: seasons roll over on 1 July. Only the sync uses this; leagues copy fpl/current. */
 export function seasonFor(d: Date): string {
   const y = d.getUTCFullYear();
   const start = d.getUTCMonth() >= 6 ? y : y - 1;

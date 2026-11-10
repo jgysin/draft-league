@@ -7,20 +7,30 @@ on:
     branches: [main]
     paths: ["backend/**", ".github/workflows/backend.yml"]
 
+# Nothing here needs more than a read-only checkout.
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
+    # A newer push to the same pull request replaces the run in progress. Runs
+    # on main are never cancelled (each has its own group), since the deploy
+    # waits on them.
+    concurrency:
+      group: backend-test-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+      cancel-in-progress: true
     defaults:
       run:
         working-directory: backend/functions
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
           cache: npm
           cache-dependency-path: backend/functions/package-lock.json
-      - uses: actions/setup-java@v4   # the Firestore emulator runs on Java
+      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4.9.1 (the Firestore emulator runs on Java)
         with:
           distribution: temurin
           java-version: 21
@@ -29,12 +39,20 @@ jobs:
       - run: npm test
 
   # Deploys functions, Firestore rules and indexes to the plleague project on
-  # every merge to main. Needs a FIREBASE_SERVICE_ACCOUNT repository secret
-  # (see backend/README.md); without it this job is skipped.
+  # every merge to main. Needs a FIREBASE_SERVICE_ACCOUNT secret in the
+  # `production` environment (see backend/README.md); without it the deploy
+  # steps are skipped. The first deploy has to be done by hand.
   deploy:
     needs: test
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
+    # The credential lives in this environment, which is restricted to main.
+    environment: production
+    # One deploy at a time; a later merge queues behind the one running rather
+    # than cancelling it half way.
+    concurrency:
+      group: backend-deploy
+      cancel-in-progress: false
     defaults:
       run:
         working-directory: backend
@@ -51,9 +69,9 @@ jobs:
             echo "ok=true" >> "$GITHUB_OUTPUT"
           fi
         working-directory: .
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         if: steps.creds.outputs.ok == 'true'
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         if: steps.creds.outputs.ok == 'true'
         with:
           node-version: 22
@@ -61,10 +79,22 @@ jobs:
           cache-dependency-path: backend/functions/package-lock.json
       - if: steps.creds.outputs.ok == 'true'
         run: npm ci --prefix functions
-      - if: steps.creds.outputs.ok == 'true'
+      # --force makes the deploy match the repository exactly, without asking:
+      # it deletes Firestore indexes and field overrides that are not in
+      # firestore.indexes.json, and deletes deployed functions that
+      # functions/src/index.ts no longer exports. It is also what lets a
+      # non-interactive deploy set the Artifact Registry cleanup policy for old
+      # function images, which the CLI otherwise stops to ask about.
+      - name: Deploy
+        if: steps.creds.outputs.ok == 'true'
         env:
           SA: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
         run: |
+          umask 077
           printf '%s' "$SA" > "$RUNNER_TEMP/sa.json"
           GOOGLE_APPLICATION_CREDENTIALS="$RUNNER_TEMP/sa.json" \
             npx --prefix functions firebase deploy --only functions,firestore --project plleague --force --non-interactive
+      - name: Remove credentials
+        if: always()
+        run: rm -f "$RUNNER_TEMP/sa.json"
+        working-directory: .

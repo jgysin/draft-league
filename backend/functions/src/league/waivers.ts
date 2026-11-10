@@ -6,9 +6,10 @@ import { Caller, loadLeague, memberRef } from "./access";
 import { logTxn } from "./manage";
 import { assertRostersOpen } from "./roster";
 import { playerNames } from "./players";
+import { bankIfDue } from "./standings";
 
 /** Commissioner runs all pending claims: fewest points picks first. */
-export async function processWaivers(db: Firestore, caller: Caller, data: { leagueId?: unknown }) {
+export async function processWaivers(db: Firestore, caller: Caller, data: { leagueId?: unknown }, now = new Date()) {
   return db.runTransaction(async tx => {
     const ctx = await loadLeague(tx, db, data.leagueId, caller, { admin: true });
     await assertRostersOpen(tx, ctx);
@@ -21,8 +22,9 @@ export async function processWaivers(db: Firestore, caller: Caller, data: { leag
     }).filter(c => ctx.members.has(c.memberId));
     const rosters = Object.fromEntries([...ctx.members].map(([id, m]) => [id, m.roster]));
     const totals = (standings.exists ? standings.get("totals") : {}) as Record<string, number>;
-    const { rosters: next, granted } = resolveWaivers({ claims, rosters, totals });
+    const { rosters: next, granted } = resolveWaivers({ claims, rosters, totals, rosterLimit: ctx.league.rosterLimit || 0 });
     const names = await playerNames(tx, db, granted.flatMap(g => [g.playerId, ...(g.drop ? [g.drop] : [])]));
+    await bankIfDue(tx, db, ctx, now);
 
     for (const id of new Set(granted.map(g => g.memberId)))
       tx.update(memberRef(db, ctx.ref.id, id), { roster: next[id] });

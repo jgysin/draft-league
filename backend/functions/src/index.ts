@@ -1,7 +1,7 @@
 import { setGlobalOptions } from "firebase-functions/v2";
 import { CallableRequest, HttpsError, onCall } from "firebase-functions/v2/https";
 import { onSchedule } from "firebase-functions/v2/scheduler";
-import { onDocumentDeleted, onDocumentUpdated, onDocumentWritten } from "firebase-functions/v2/firestore";
+import { onDocumentUpdated, onDocumentWritten } from "firebase-functions/v2/firestore";
 import { logger } from "firebase-functions";
 import { db, REGION } from "./admin";
 import { Caller, requireAuth } from "./league/access";
@@ -17,9 +17,16 @@ setGlobalOptions({ region: REGION, maxInstances: 10 });
 
 type Handler = (database: typeof db, caller: Caller, data: any) => Promise<unknown>;
 
+/**
+ * Requests without a valid App Check token are refused when this is on. It is
+ * off until the app ships App Check; then set ENFORCE_APP_CHECK=true in
+ * functions/.env and redeploy.
+ */
+const ENFORCE_APP_CHECK = process.env.ENFORCE_APP_CHECK === "true";
+
 /** Wrap a handler as a callable: auth check, then turn unexpected errors into a generic message. */
 function callable(handler: Handler) {
-  return onCall(async (req: CallableRequest) => {
+  return onCall({ enforceAppCheck: ENFORCE_APP_CHECK }, async (req: CallableRequest) => {
     const caller = requireAuth(req.auth);
     try {
       return await handler(db, caller, req.data ?? {});
@@ -70,5 +77,8 @@ export const onLeagueSettings = onDocumentUpdated("leagues/{leagueId}", async ev
 });
 export const onScheduleWritten = onDocumentWritten("leagues/{leagueId}/meta/schedule",
   async event => { await recomputeStandings(db, event.params.leagueId); });
-export const onMemberRemoved = onDocumentDeleted("leagues/{leagueId}/members/{memberId}",
-  async event => { await recomputeStandings(db, event.params.leagueId); });
+/** A team joining or leaving changes the table; roster and name edits (the common writes) don't. */
+export const onMemberWritten = onDocumentWritten("leagues/{leagueId}/members/{memberId}", async event => {
+  if (event.data?.before.exists === event.data?.after.exists) return;
+  await recomputeStandings(db, event.params.leagueId);
+});

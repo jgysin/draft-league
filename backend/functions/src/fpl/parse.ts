@@ -44,7 +44,10 @@ export interface EventLive {
   }[];
 }
 
-/** Gameweek stats keyed by player code. Players who did not feature are left out. */
+/**
+ * Gameweek stats keyed by player code. Players who did not feature are left
+ * out, unless they still picked up a card or own goal (an unused sub can be booked).
+ */
 export function parseLive(data: EventLive, elementToCode: Record<string, string>): Record<string, PlayerGwStats> {
   const out: Record<string, PlayerGwStats> = {};
   for (const e of data.elements) {
@@ -54,7 +57,7 @@ export function parseLive(data: EventLive, elementToCode: Record<string, string>
     const apps = (e.explain || []).filter(f =>
       f.stats.some(x => x.identifier === "minutes" && x.value > 0)).length
       || (s.minutes > 0 ? 1 : 0);
-    if (!apps && !s.minutes) continue;
+    if (!apps && !s.minutes && !s.yellow_cards && !s.red_cards && !s.own_goals) continue;
     out[code] = {
       apps, minutes: s.minutes, goals: s.goals_scored, assists: s.assists, cs: s.clean_sheets,
       yc: s.yellow_cards, rc: s.red_cards, og: s.own_goals,
@@ -63,12 +66,10 @@ export function parseLive(data: EventLive, elementToCode: Record<string, string>
   return out;
 }
 
-/** Gameweeks that have started but whose stats FPL has not finalised yet. */
-export function unsettledGameweeks(events: FplEvent[], now: Date): number[] {
-  return events.filter(e => new Date(e.deadline) <= now && !e.dataChecked).map(e => e.id);
-}
-
-/** Gameweeks whose deadline has passed, newest last. */
-export function passedDeadlines(events: FplEvent[], now: Date): number[] {
-  return events.filter(e => new Date(e.deadline) <= now).map(e => e.id);
+/** Gameweeks whose deadline has passed, oldest first. Tolerates a malformed stored events list. */
+export function passedDeadlines(events: unknown, now: Date): number[] {
+  if (!Array.isArray(events)) return [];
+  return (events as FplEvent[])
+    .filter(e => e && Number.isInteger(e.id) && new Date(e.deadline) <= now)
+    .map(e => e.id).sort((a, b) => a - b);
 }

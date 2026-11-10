@@ -1,1 +1,9 @@
 *.log
+*-debug.log
+.firebase/
+
+# Secrets: env files and service account keys never belong in the repo.
+.env*
+*-key.json
+plleague-*.json
+service-account*.json
