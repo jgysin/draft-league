@@ -1,9 +1,9 @@
 import { useLocalSearchParams } from 'expo-router';
 import { useState } from 'react';
-import { Pressable, View } from 'react-native';
+import { View } from 'react-native';
 import { useStandings } from '@/lib/hooks';
 import { useLeagueCtx } from '@/lib/league-context';
-import { Card, Empty, Heading, Rule, Screen, Text } from '@/ui/kit';
+import { Card, Empty, Heading, Rule, Screen, Text, TextButton } from '@/ui/kit';
 import { space } from '@/ui/theme';
 
 export default function Table() {
@@ -15,6 +15,7 @@ export default function Table() {
   const totals = standings?.totals ?? {};
   const gws = Object.keys(standings?.gwPoints ?? {}).map(Number).sort((a, b) => a - b);
   const lastGw = gws[gws.length - 1];
+  const live = lastGw !== undefined && lastGw === standings?.liveGw;
   const rows = members.map(m => ({ m, total: totals[m.id] ?? 0, last: lastGw ? standings!.gwPoints[lastGw][m.id] ?? 0 : 0 }))
     .sort((a, b) => b.total - a.total || a.m.teamName.localeCompare(b.m.teamName));
   const h2h = standings?.h2h ?? null;
@@ -24,9 +25,8 @@ export default function Table() {
       {league.h2h && h2h && (
         <View style={{ flexDirection: 'row', gap: space(4) }}>
           {(['h2h', 'total'] as const).map(v => (
-            <Pressable key={v} onPress={() => setView(v)}>
-              <Text bold caps size={13} tone={view === v ? 'coral' : 'muted'}>{v === 'h2h' ? 'Head to head' : 'Total points'}</Text>
-            </Pressable>
+            <TextButton key={v} title={v === 'h2h' ? 'Head to head' : 'Total points'} selected={view === v}
+              tone={view === v ? 'coral' : 'muted'} onPress={() => setView(v)} />
           ))}
         </View>
       )}
@@ -51,7 +51,7 @@ export default function Table() {
         )}
       </Card>
       {!gws.length && <Empty>Points appear here once the first gameweek after the draft kicks off.</Empty>}
-      {gws.length > 0 && <Heading>Updated live from FPL during matches</Heading>}
+      {gws.length > 0 && <Heading>{live ? `GW${lastGw} is live · points not final yet` : 'Updated live from FPL during matches'}</Heading>}
     </Screen>
   );
 }

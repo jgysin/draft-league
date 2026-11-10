@@ -2,20 +2,21 @@ import { router } from 'expo-router';
 import { Pressable, View } from 'react-native';
 import { useAuth } from '@/lib/auth';
 import { useMyLeagues } from '@/lib/hooks';
-import { Button, Card, Empty, Heading, Loading, Screen, Text } from '@/ui/kit';
+import { Button, Card, Empty, ErrorState, Heading, Loading, Screen, Text } from '@/ui/kit';
 import { space } from '@/ui/theme';
 
 export default function Leagues() {
   const { user, signOut } = useAuth();
-  const { data: leagues, loading } = useMyLeagues(user?.uid ?? null);
+  const { data: leagues, loading, error, retry } = useMyLeagues(user?.uid ?? null);
   if (loading) return <Loading />;
 
   return (
     <Screen>
       <Heading>Your leagues</Heading>
-      {leagues.length === 0 && <Empty>You’re not in a league yet. Join one with an invite code, or start your own.</Empty>}
+      {error && <ErrorState message="Couldn’t load your leagues. Check your connection and try again." onRetry={retry} />}
+      {!error && leagues.length === 0 && <Empty>You’re not in a league yet. Join one with an invite code, or start your own.</Empty>}
       {[...leagues].sort((a, b) => a.name.localeCompare(b.name)).map(l => (
-        <Pressable key={l.id} onPress={() => router.push({ pathname: '/league/[id]', params: { id: l.id } })}>
+        <Pressable key={l.id} accessibilityRole="button" onPress={() => router.push({ pathname: '/league/[id]', params: { id: l.id } })}>
           <Card>
             <Text size={20} bold>{l.name}</Text>
             <Text size={13} tone="muted">{l.memberUids.length} signed in · {l.season}</Text>

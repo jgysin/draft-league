@@ -5,7 +5,10 @@ export interface LeagueCtx {
   league: League;
   members: Member[];
   me: Member | null;
+  /** Null while the player pool is loading or failed to load (then catalogError is set). */
   catalog: Map<string, CatalogPlayer> | null;
+  catalogError: Error | null;
+  retryCatalog: () => void;
   nicknames: Record<string, string>;
   memberName: (id: string | null | undefined) => string;
   playerName: (code: string) => string;

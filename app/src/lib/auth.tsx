@@ -24,7 +24,7 @@ interface AuthState {
 
 const AuthContext = createContext<AuthState | null>(null);
 
-/** After any sign-in, pick up team slots the commissioner reserved for this email. */
+/** Pick up team slots the commissioner reserved for this email. */
 async function afterSignIn() {
   try { await api.claimSlots({}); } catch { /* not fatal: they can still join by code */ }
 }
@@ -33,7 +33,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [ready, setReady] = useState(false);
 
-  useEffect(() => onAuthStateChanged(auth, u => { setUser(u); setReady(true); }), []);
+  // Fires once per launch with the restored user and again after every sign-in.
+  useEffect(() => onAuthStateChanged(auth, u => {
+    setUser(u);
+    setReady(true);
+    if (u) afterSignIn();
+  }), []);
 
   async function signInWithApple() {
     // Apple signs a hash of the nonce; Firebase checks it against the raw value.
@@ -56,7 +61,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     // Apple only shares the name on the very first sign-in, so keep it.
     if (!result.user.displayName && cred.fullName?.givenName)
       await updateProfile(result.user, { displayName: AppleAuthentication.formatFullName(cred.fullName) });
-    await afterSignIn();
   }
 
   async function signInWithGoogle() {
@@ -65,7 +69,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       if (res.type !== 'success') return;
       if (!res.data.idToken) throw new Error('Google sign-in returned no token.');
       await signInWithCredential(auth, GoogleAuthProvider.credential(res.data.idToken));
-      await afterSignIn();
     } catch (e) {
       if (isErrorWithCode(e) && e.code === statusCodes.IN_PROGRESS) return;
       throw e;

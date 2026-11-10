@@ -55,9 +55,29 @@ export function Button({ title, onPress, kind = 'primary', busy, disabled }: {
   const fg = kind === 'secondary' ? c.ink : c.paper;
   const off = disabled || busy;
   return (
-    <Pressable accessibilityRole="button" disabled={off} onPress={onPress}
+    <Pressable accessibilityRole="button" accessibilityLabel={title}
+      accessibilityState={{ busy: !!busy, disabled: !!off }} disabled={off} onPress={onPress}
       style={({ pressed }) => [styles.button, { backgroundColor: bg, borderColor: c.ink, opacity: off ? 0.5 : pressed ? 0.75 : 1 }]}>
       {busy ? <ActivityIndicator color={fg} /> : <Text bold caps size={14} style={{ color: fg }}>{title}</Text>}
+    </Pressable>
+  );
+}
+
+/**
+ * A word that acts as a button (Add, Drop, Send, filters). The text is small, so the
+ * pressable is padded out to Apple's 44pt minimum.
+ */
+export function TextButton({ title, onPress, tone = 'coral', size = 13, label, busy, disabled, selected, style }: {
+  title: string; onPress: () => void; tone?: Tone; size?: number; label?: string; busy?: boolean; disabled?: boolean;
+  selected?: boolean; style?: StyleProp<ViewStyle>;
+}) {
+  const off = disabled || busy;
+  return (
+    <Pressable accessibilityRole="button" accessibilityLabel={label ?? title}
+      accessibilityState={{ busy: !!busy, disabled: !!off, ...(selected === undefined ? {} : { selected }) }}
+      disabled={off} onPress={onPress} hitSlop={6}
+      style={({ pressed }) => [styles.textButton, { opacity: pressed ? 0.6 : 1 }, style]}>
+      <Text bold caps size={size} tone={tone}>{busy ? '…' : title}</Text>
     </Pressable>
   );
 }
@@ -73,10 +93,22 @@ export function Field({ label, ...rest }: React.ComponentProps<typeof TextInput>
   );
 }
 
-export function Loading() {
+/** Centred spinner. Children (a way out, say) sit under it. */
+export function Loading({ children }: { children?: ReactNode }) {
   const c = usePalette();
-  return <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center', backgroundColor: c.paper }}>
-    <ActivityIndicator color={c.ink} /></View>;
+  return <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center', gap: space(6), padding: space(6), backgroundColor: c.paper }}>
+    <ActivityIndicator color={c.ink} />{children}</View>;
+}
+
+/** Something failed to load: say so and offer another go. Children are extra buttons. */
+export function ErrorState({ message, onRetry, children }: { message: string; onRetry: () => void; children?: ReactNode }) {
+  return (
+    <View style={{ gap: space(3), paddingVertical: space(6) }}>
+      <Text tone="muted" style={{ textAlign: 'center' }}>{message}</Text>
+      <Button title="Retry" onPress={onRetry} />
+      {children}
+    </View>
+  );
 }
 
 export function Empty({ children }: { children: ReactNode }) {
@@ -91,6 +123,7 @@ export function Pill({ children, tone = 'muted' }: { children: ReactNode; tone?:
 
 
 const styles = StyleSheet.create({
+  textButton: { minHeight: 44, minWidth: 44, alignItems: 'center', justifyContent: 'center' },
   button: { minHeight: 48, borderWidth: 1.5, borderRadius: 4, alignItems: 'center', justifyContent: 'center', paddingHorizontal: space(4) },
   input: { borderWidth: 1.5, borderRadius: 4, paddingHorizontal: space(3), paddingVertical: space(3), fontSize: 16 },
 });

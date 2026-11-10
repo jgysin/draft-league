@@ -19,8 +19,4 @@ export const api = {
   submitClaim: call<L & { playerId: string; drop?: string | null }, { claimId: string }>('submitClaim'),
 };
 
-/** The message a callable error carries, for showing to the user. */
-export function errorMessage(e: unknown): string {
-  const msg = (e as { message?: string })?.message;
-  return msg && !msg.startsWith('internal') ? msg : 'Something went wrong. Try again.';
-}
+export { authErrorMessage, errorMessage, writeErrorMessage } from './errors';

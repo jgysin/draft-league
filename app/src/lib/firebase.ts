@@ -1,5 +1,5 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { getReactNativePersistence, initializeAuth } from '@firebase/auth';
+import { Auth, getAuth, getReactNativePersistence, initializeAuth } from '@firebase/auth';
 import { initializeApp } from 'firebase/app';
 import { initializeFirestore } from 'firebase/firestore';
 import { getFunctions } from 'firebase/functions';
@@ -18,7 +18,12 @@ const config = {
 export const FUNCTIONS_REGION = 'us-central1';
 
 export const app = initializeApp(config);
-export const auth = initializeAuth(app, { persistence: getReactNativePersistence(AsyncStorage) });
+// initializeAuth throws if it runs twice for one app, which Fast Refresh can do.
+function initAuth(): Auth {
+  try { return initializeAuth(app, { persistence: getReactNativePersistence(AsyncStorage) }); }
+  catch { return getAuth(app); }
+}
+export const auth = initAuth();
 // Long polling is more reliable than WebChannel streaming on React Native.
 export const db = initializeFirestore(app, { experimentalForceLongPolling: true });
 export const functions = getFunctions(app, FUNCTIONS_REGION);

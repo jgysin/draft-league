@@ -13,13 +13,14 @@ export interface League {
   memberUids: string[];
   h2h: boolean;
   waivers: boolean;
+  /** Most players a team may hold; 0 or missing means unlimited. */
+  rosterLimit?: number;
 }
 
 export interface Member {
   id: string;
   teamName: string;
   uid: string | null;
-  email: string | null;
   role: Role;
   roster: string[];
 }
@@ -30,6 +31,8 @@ export interface CatalogPlayer { c: string; n: string; f: string; p: Position; t
 export interface Standings {
   gwPoints: Record<string, Record<string, number>>;
   totals: Record<string, number>;
+  /** The gameweek currently in play, whose points are not final yet. */
+  liveGw?: number;
   h2h: { memberId: string; p: number; w: number; d: number; l: number; pts: number; total: number }[] | null;
 }
 

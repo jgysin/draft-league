@@ -17,6 +17,13 @@ export default function LeagueInfo() {
   const [busy, setBusy] = useState(false);
   const admin = isAdmin(me);
 
+  function confirmRotate() {
+    Alert.alert('Change the invite code?', 'The current code stops working. Anyone you already invited will need the new one.', [
+      { text: 'Cancel', style: 'cancel' },
+      { text: 'New code', style: 'destructive', onPress: rotate },
+    ]);
+  }
+
   async function rotate() {
     setBusy(true);
     try { await api.rotateInvite({ leagueId: league.id }); }
@@ -26,8 +33,10 @@ export default function LeagueInfo() {
   function rename() {
     if (!me) return;
     Alert.prompt('Team name', undefined, async name => {
-      if (!name?.trim()) return;
-      try { await api.updateMember({ leagueId: league.id, memberId: me.id, teamName: name.trim() }); }
+      // Alert.prompt has no length limit of its own; the backend allows 40.
+      const teamName = name?.trim().slice(0, 40).trim();
+      if (!teamName) return;
+      try { await api.updateMember({ leagueId: league.id, memberId: me.id, teamName }); }
       catch (e) { Alert.alert("Couldn't rename", errorMessage(e)); }
     }, 'plain-text', me.teamName);
   }
@@ -39,7 +48,7 @@ export default function LeagueInfo() {
         <Text size={32} bold style={{ letterSpacing: 6 }}>{league.inviteCode}</Text>
         <Button title="Share invite" onPress={() => Share.share({
           message: `Join "${league.name}" on Draft League with code ${league.inviteCode}` })} />
-        {admin && <Button title="New code" kind="secondary" busy={busy} onPress={rotate} />}
+        {admin && <Button title="New code" kind="secondary" busy={busy} onPress={confirmRotate} />}
       </Card>
 
       <Card>

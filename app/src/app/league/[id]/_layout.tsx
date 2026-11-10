@@ -5,7 +5,7 @@ import { useMemo } from 'react';
 import { useAuth } from '@/lib/auth';
 import { useCatalog, useLeague, useMembers, useNicknames } from '@/lib/hooks';
 import { LeagueContext, LeagueCtx } from '@/lib/league-context';
-import { Empty, Loading, Screen } from '@/ui/kit';
+import { Button, Empty, ErrorState, Loading, Screen } from '@/ui/kit';
 import { font, usePalette } from '@/ui/theme';
 
 function icon(name: SFSymbol) {
@@ -13,6 +13,8 @@ function icon(name: SFSymbol) {
     return <SymbolView name={name} tintColor={color} size={22} />;
   };
 }
+
+const allLeagues = () => router.dismissTo('/');
 
 export default function LeagueLayout() {
   const { id } = useLocalSearchParams<{ id: string }>();
@@ -28,15 +30,27 @@ export default function LeagueLayout() {
     const byId = new Map(members.data.map(m => [m.id, m]));
     const nicks = (nicknames.data ?? {}) as Record<string, string>;
     return {
-      league: league.data, members: members.data, catalog, nicknames: nicks,
+      league: league.data, members: members.data, nicknames: nicks,
+      catalog: catalog.data, catalogError: catalog.error, retryCatalog: catalog.retry,
       me: members.data.find(m => m.uid === user?.uid) ?? null,
       memberName: mid => (mid && byId.get(mid)?.teamName) || 'Free agent',
-      playerName: code => nicks[code] || catalog?.get(code)?.n || `#${code}`,
+      playerName: code => nicks[code] || catalog.data?.get(code)?.n || `#${code}`,
     };
-  }, [league.data, members.data, nicknames.data, catalog, user?.uid]);
+  }, [league.data, members.data, nicknames.data, catalog.data, catalog.error, catalog.retry, user?.uid]);
 
-  if (league.loading || members.loading) return <Loading />;
-  if (!ctx) return <Screen edges={['top']}><Empty>This league isn’t available.</Empty></Screen>;
+  const back = <Button title="All leagues" kind="secondary" onPress={allLeagues} />;
+  // Removed from the league (or it never was ours): the rules now deny the read.
+  const denied = [league.error, members.error].some(e => (e as { code?: string } | null)?.code === 'permission-denied');
+  if (denied || (!league.loading && !league.error && !league.data))
+    return <Screen edges={['top', 'bottom']}><Empty>This league isn’t available.</Empty>{back}</Screen>;
+  if (league.error || members.error)
+    return (
+      <Screen edges={['top', 'bottom']}>
+        <ErrorState message="Couldn’t load this league. Check your connection and try again."
+          onRetry={() => { if (league.error) league.retry(); if (members.error) members.retry(); }}>{back}</ErrorState>
+      </Screen>
+    );
+  if (league.loading || members.loading || !ctx) return <Loading>{back}</Loading>;
 
   return (
     <LeagueContext.Provider value={ctx}>
@@ -48,8 +62,8 @@ export default function LeagueLayout() {
         tabBarLabelStyle: { fontFamily: font, fontWeight: '700' },
         sceneStyle: { backgroundColor: c.paper },
         headerLeft: () => (
-          <Pressable accessibilityLabel="All leagues" hitSlop={12} style={{ paddingHorizontal: 16 }}
-            onPress={() => router.dismissTo('/')}>
+          <Pressable accessibilityRole="button" accessibilityLabel="All leagues" hitSlop={12}
+            style={{ paddingHorizontal: 16, minHeight: 44, justifyContent: 'center' }} onPress={allLeagues}>
             <SymbolView name="chevron.left" tintColor={c.ink} size={20} />
           </Pressable>
         ),
