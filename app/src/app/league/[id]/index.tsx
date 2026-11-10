@@ -15,7 +15,7 @@ export default function Table() {
   const totals = standings?.totals ?? {};
   const gws = Object.keys(standings?.gwPoints ?? {}).map(Number).sort((a, b) => a - b);
   const lastGw = gws[gws.length - 1];
-  const live = lastGw !== undefined && lastGw === standings?.liveGw;
+  const live = lastGw !== undefined && (standings?.liveGw ?? []).includes(lastGw);
   const rows = members.map(m => ({ m, total: totals[m.id] ?? 0, last: lastGw ? standings!.gwPoints[lastGw][m.id] ?? 0 : 0 }))
     .sort((a, b) => b.total - a.total || a.m.teamName.localeCompare(b.m.teamName));
   const h2h = standings?.h2h ?? null;

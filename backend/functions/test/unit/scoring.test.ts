@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { computeStandings, statPoints } from "../../src/core/scoring";
+import { computeStandings, GwInput, statPoints } from "../../src/core/scoring";
 import { DEFAULT_SCORING } from "../../src/core/types";
 
 describe("statPoints", () => {
@@ -23,10 +23,10 @@ describe("statPoints", () => {
 
 describe("computeStandings", () => {
   const positions = { p1: "FWD", p2: "MID", p3: "DEF" } as const;
-  const gameweeks = [
-    { gw: 1, owners: { p1: "a", p2: "b" }, stats: { p1: { apps: 1, goals: 1 }, p2: { apps: 1 }, p3: { apps: 1, goals: 3 } } },
+  const gameweeks: GwInput[] = [
+    { gw: 1, final: true, owners: { p1: "a", p2: "b" }, stats: { p1: { apps: 1, goals: 1 }, p2: { apps: 1 }, p3: { apps: 1, goals: 3 } } },
     // p1 moved to b before gw 2's deadline: gw 1 points stay with a
-    { gw: 2, owners: { p1: "b", p2: "b" }, stats: { p1: { apps: 1 } } },
+    { gw: 2, final: true, owners: { p1: "b", p2: "b" }, stats: { p1: { apps: 1 } } },
   ];
 
   it("credits points to whoever owned the player at the deadline", () => {
@@ -37,6 +37,7 @@ describe("computeStandings", () => {
     expect(s.awards[1].top).toEqual({ playerId: "p3", pts: 19, owner: null });
     expect(s.awards[1].best.memberId).toBe("a");
     expect(s.h2h).toBeNull();
+    expect(s.liveGw).toEqual([]);
   });
 
   it("builds the head-to-head table with total points as tiebreak", () => {
@@ -44,5 +45,16 @@ describe("computeStandings", () => {
       schedule: { 1: [["a", "b"]], 2: [["a", "b"]] } });
     expect(s.h2h![0]).toMatchObject({ memberId: "a", w: 1, l: 1, pts: 3, total: 5 });
     expect(s.h2h![1]).toMatchObject({ memberId: "b", w: 1, l: 1, pts: 3, total: 2 });
+  });
+
+  it("leaves gameweeks that aren't final out of the head-to-head table but not the totals", () => {
+    const live = [gameweeks[0], { ...gameweeks[1], final: false }];
+    const s = computeStandings({ memberIds: ["a", "b"], positions, scoring: DEFAULT_SCORING, gameweeks: live,
+      schedule: { 1: [["a", "b"]], 2: [["a", "b"]] } });
+    expect(s.liveGw).toEqual([2]);
+    expect(s.gwPoints[2]).toEqual({ a: 0, b: 1 });
+    expect(s.totals).toEqual({ a: 5, b: 2 });
+    expect(s.h2h![0]).toMatchObject({ memberId: "a", p: 1, w: 1, l: 0, pts: 3, total: 5 });
+    expect(s.h2h![1]).toMatchObject({ memberId: "b", p: 1, w: 0, l: 1, pts: 0, total: 2 });
   });
 });

@@ -32,7 +32,7 @@ export interface Standings {
   gwPoints: Record<string, Record<string, number>>;
   totals: Record<string, number>;
   /** The gameweek currently in play, whose points are not final yet. */
-  liveGw?: number;
+  liveGw?: number[];
   h2h: { memberId: string; p: number; w: number; d: number; l: number; pts: number; total: number }[] | null;
 }
 

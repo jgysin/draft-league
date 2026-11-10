@@ -9,21 +9,22 @@
       ]
     },
     {
-      "collectionGroup": "waivers",
-      "queryScope": "COLLECTION",
-      "fields": [
-        { "fieldPath": "memberId", "order": "ASCENDING" },
-        { "fieldPath": "playerId", "order": "ASCENDING" }
-      ]
-    },
-    {
-      "collectionGroup": "members",
+      "collectionGroup": "slots",
       "queryScope": "COLLECTION_GROUP",
       "fields": [
         { "fieldPath": "email", "order": "ASCENDING" },
-        { "fieldPath": "uid", "order": "ASCENDING" }
+        { "fieldPath": "autoClaim", "order": "ASCENDING" }
       ]
     }
   ],
-  "fieldOverrides": []
+  "fieldOverrides": [
+    { "collectionGroup": "fpl", "fieldPath": "elementToCode", "indexes": [] },
+    { "collectionGroup": "fpl", "fieldPath": "players", "indexes": [] },
+    { "collectionGroup": "fpl", "fieldPath": "events", "indexes": [] },
+    { "collectionGroup": "gameweeks", "fieldPath": "stats", "indexes": [] },
+    { "collectionGroup": "gameweeks", "fieldPath": "owners", "indexes": [] },
+    { "collectionGroup": "gameweeks", "fieldPath": "legacyStats", "indexes": [] },
+    { "collectionGroup": "meta", "fieldPath": "gwPoints", "indexes": [] },
+    { "collectionGroup": "meta", "fieldPath": "awards", "indexes": [] }
+  ]
 }

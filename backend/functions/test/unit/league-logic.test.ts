@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { newInviteCode, quotaBlocked, resolveWaivers, roundRobin, seasonFor, snakePick } from "../../src/core/league-logic";
+import { INVITE_CODE_RE, newInviteCode, quotaBlocked, resolveWaivers, roundRobin, seasonFor, snakePick } from "../../src/core/league-logic";
 
 describe("snakePick", () => {
   it("reverses every other round", () => {
@@ -57,10 +57,38 @@ describe("resolveWaivers", () => {
     });
     expect(r.granted.map(g => g.id)).toEqual(["1"]);
   });
+
+  it("fails a claim with no drop when the roster is at the limit", () => {
+    const r = resolveWaivers({
+      claims: [
+        { id: "1", memberId: "a", playerId: "x", drop: null, tsMs: 1 },
+        { id: "2", memberId: "a", playerId: "y", drop: "p1", tsMs: 2 },
+        { id: "3", memberId: "b", playerId: "x", drop: null, tsMs: 3 },
+      ],
+      rosters: { a: ["p1", "p2"], b: ["p3"] }, totals: {}, rosterLimit: 2,
+    });
+    expect(r.granted.map(g => g.id)).toEqual(["2", "3"]);
+    expect(r.rosters).toEqual({ a: ["p2", "y"], b: ["p3", "x"] });
+  });
 });
 
-it("invite codes avoid lookalike characters", () => {
-  for (let i = 0; i < 200; i++) expect(newInviteCode()).toMatch(/^[A-HJ-NP-Z2-9]{6}$/);
+it("invite codes are 8 characters and avoid lookalikes", () => {
+  const seen = new Set<string>();
+  for (let i = 0; i < 200; i++) {
+    const code = newInviteCode();
+    expect(code).toMatch(/^[A-HJ-NP-Z2-9]{8}$/);
+    expect(code).toMatch(INVITE_CODE_RE);
+    seen.add(code);
+  }
+  expect(seen.size).toBe(200);
+  expect("ABC234").toMatch(INVITE_CODE_RE);          // codes issued before the change still parse
+  expect("abc234").not.toMatch(INVITE_CODE_RE);
+  expect("ABC23").not.toMatch(INVITE_CODE_RE);
+  expect("ABC/234").not.toMatch(INVITE_CODE_RE);
+});
+
+it("an empty draft order puts nobody on the clock", () => {
+  expect(snakePick([], 0).memberId).toBeUndefined();
 });
 
 it("seasons roll over in July", () => {

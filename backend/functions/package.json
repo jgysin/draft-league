@@ -8,6 +8,7 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
+    "gcp-build": "",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test:unit": "vitest run test/unit",
     "test:emulator": "firebase emulators:exec --config ../firebase.json --project demo-draft-league --only firestore \"vitest run test/integration\"",

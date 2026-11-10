@@ -3,20 +3,47 @@ rules_version = '2';
 // All league writes go through Cloud Functions (backend/functions), which run
 // with admin access and enforce turn order, roster rules and permissions.
 // Clients only read, plus post chat messages and keep their own profile.
+// Anything not matched below is denied.
 service cloud.firestore {
   match /databases/{database}/documents {
     function signedIn() { return request.auth != null; }
 
+    // A real Google account: signed in, with an email Google has verified.
+    function verified() {
+      return request.auth != null && request.auth.token.email_verified == true;
+    }
+
     // ---- Legacy website (utter-woke-nonsense.com) ----------------------------
-    // The single-file app still reads and writes these root collections openly.
+    // The single-file app (index.html at the repo root) still uses these root
+    // collections. Anyone may read them, because the site shows standings
+    // before you sign in. Writes need a verified Google account, which is what
+    // the site's "Sign in with Google" button gives you; every write the site
+    // makes already sits behind that sign-in. The rules cannot tell a manager
+    // from any other Google account (the site decides that in the browser), so
+    // this stops anonymous scripts, not a signed-in stranger.
+    // These match single documents only, not subcollections under them.
     // Delete this block once everyone has moved to the app.
-    match /meta/{doc}        { allow read, write: if true; }
-    match /managers/{id}     { allow read, write: if true; }
-    match /gameweeks/{id}    { allow read, write: if true; }
-    match /chat/{id}         { allow read, write: if true; }
-    match /trades/{id}       { allow read, write: if true; }
-    match /txns/{id}         { allow read, write: if true; }
-    match /waivers/{id}      { allow read, write: if true; }
+    match /meta/{doc}        { allow read: if true; allow write: if verified(); }
+    match /managers/{id}     { allow read: if true; allow write: if verified(); }
+    match /gameweeks/{id}    { allow read: if true; allow write: if verified(); }
+    match /trades/{id}       { allow read: if true; allow write: if verified(); }
+    match /waivers/{id}      { allow read: if true; allow write: if verified(); }
+
+    // Chat messages and the transaction log are free text, so cap their size.
+    function legacyText() {
+      return request.resource.data.text is string
+        && request.resource.data.text.size() <= 2000;
+    }
+    match /chat/{id} {
+      allow read: if true;
+      allow create: if verified() && legacyText();
+      allow update, delete: if verified();
+    }
+    match /txns/{id} {
+      allow read: if true;
+      allow create: if verified() && legacyText();
+      allow update, delete: if verified();
+    }
     // --------------------------------------------------------------------------
 
     // Shared FPL data, written only by the sync job.
@@ -24,35 +51,73 @@ service cloud.firestore {
     match /fpl/{doc}                       { allow read: if signedIn(); }
     match /seasons/{season}/gameweeks/{gw} { allow read: if signedIn(); }
 
+    // Your own profile. Only the three known fields, each with a sane shape.
     match /users/{uid} {
-      allow read: if signedIn() && request.auth.uid == uid;
-      allow write: if signedIn() && request.auth.uid == uid
-        && request.resource.data.keys().hasOnly(['displayName', 'pushTokens', 'updatedAt']);
+      function isSelf() { return signedIn() && request.auth.uid == uid; }
+      function validProfile() {
+        let d = request.resource.data;
+        return d.keys().hasOnly(['displayName', 'pushTokens', 'updatedAt'])
+          && (!('displayName' in d) || (d.displayName is string && d.displayName.size() <= 60))
+          && (!('pushTokens' in d) || (d.pushTokens is list && d.pushTokens.size() <= 10));
+      }
+
+      allow read: if isSelf();
+      // updatedAt, when sent, must be the server's clock.
+      allow create: if isSelf() && validProfile()
+        && (!('updatedAt' in request.resource.data)
+            || request.resource.data.updatedAt == request.time);
+      // On update an untouched updatedAt is fine; a changed one must be now.
+      allow update: if isSelf() && validProfile()
+        && (!('updatedAt' in request.resource.data)
+            || request.resource.data.updatedAt == request.time
+            || request.resource.data.updatedAt == resource.data.get('updatedAt', null));
+      allow delete: if isSelf();
     }
 
     match /leagues/{leagueId} {
+      // A league still being copied from the website (`migrating: true`) is
+      // closed to everyone until the migration finishes.
       function isMember() {
-        return signedIn() && request.auth.uid in
-          get(/databases/$(database)/documents/leagues/$(leagueId)).data.memberUids;
+        let league = get(/databases/$(database)/documents/leagues/$(leagueId)).data;
+        return signedIn() && request.auth.uid in league.memberUids
+          && league.get('migrating', false) != true;
       }
 
       // `list` works because the app queries memberUids array-contains its uid.
-      allow read: if signedIn() && request.auth.uid in resource.data.memberUids;
+      // The `migrating` check is on `get` only. A list query is judged by its
+      // constraints, not by each document it returns, so the check would hide
+      // nothing there (the emulator lets the query through and still returns
+      // the league) and could make production reject the app's league query.
+      // A migrating league therefore still shows up in a member's league list,
+      // but its document can't be opened and its subcollections can't be read.
+      allow get: if signedIn() && request.auth.uid in resource.data.memberUids
+        && resource.data.get('migrating', false) != true;
+      allow list: if signedIn() && request.auth.uid in resource.data.memberUids;
 
+      // The only league data clients write. A message must be posted as
+      // yourself, from the team you hold, stamped with the server's clock.
+      // Messages can't be edited or deleted.
       match /chat/{msgId} {
         allow read: if isMember();
         allow create: if isMember()
           && request.resource.data.keys().hasOnly(['uid', 'memberId', 'text', 'ts'])
           && request.resource.data.uid == request.auth.uid
+          && request.resource.data.memberId is string
           && get(/databases/$(database)/documents/leagues/$(leagueId)/members/$(request.resource.data.memberId)).data.uid == request.auth.uid
           && request.resource.data.text is string
           && request.resource.data.text.size() > 0
+          && request.resource.data.text.trim().size() > 0
           && request.resource.data.text.size() <= 1000
           && request.resource.data.ts == request.time;
       }
 
+      // Members read the subcollections named here and nothing else. `slots`
+      // (reserved emails) is deliberately absent, as is anything added later:
+      // a new subcollection stays private until it is listed.
       match /{collection}/{docId} {
-        allow read: if collection != 'chat' && isMember();
+        allow read: if collection in
+            ['members', 'draft', 'gameweeks', 'meta', 'trades', 'waivers', 'txns']
+          && isMember();
       }
     }
   }

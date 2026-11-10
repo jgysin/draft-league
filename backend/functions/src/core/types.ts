@@ -65,22 +65,36 @@ export interface League {
   waivers: boolean;
   /** Highest gameweek whose deadline ownership has been banked. */
   bankedGw: number;
+  /** Most players a team may hold; 0 = unlimited. Set to the draft's rounds when it completes. */
+  rosterLimit: number;
+  /** Present only while the migration is still copying; such a league is ignored everywhere. */
+  migrating?: boolean;
   createdAt: FirebaseFirestore.Timestamp;
 }
 
 /**
  * leagues/{leagueId}/members/{memberId}
  * A member is a team in the league. `uid` is null for a slot the commissioner
- * created (or migrated) that nobody has claimed yet; it is claimed by the
- * first signed-in user whose email matches `email`.
+ * created (or migrated) that nobody has claimed yet. Emails are private, so a
+ * reserved email lives in the matching `slots` doc, never here.
  */
 export interface Member {
   teamName: string;
   uid: string | null;
-  email: string | null;
   role: Role;
   roster: string[];
   joinedAt: FirebaseFirestore.Timestamp | null;
+}
+
+/**
+ * leagues/{leagueId}/slots/{memberId}
+ * The email an unclaimed team is reserved for. Functions only: clients must
+ * not be able to read these. `autoClaim` slots (migrated leagues) are claimed
+ * on sign-in; the rest only when their owner joins with the invite code.
+ */
+export interface Slot {
+  email: string;      // lowercased
+  autoClaim: boolean;
 }
 
 export type DraftStatus = "setup" | "live" | "done";
@@ -92,6 +106,8 @@ export interface DraftState {
   rounds: number;
   quotas: Record<Position, number>;         // max per position, 0 = unlimited
   picks: { memberId: string; playerId: string }[];
+  /** league.bankedGw when the draft went live; a reset is refused once a later gameweek is banked. */
+  startedAtGw?: number;
 }
 
 export type TradeStatus = "open" | "accepted" | "rejected" | "cancelled" | "vetoed" | "void";
@@ -138,5 +154,16 @@ export interface FplCurrent {
   season: string;
   events: FplEvent[];
   elementToCode: Record<string, string>;
+  finalized?: number[];       // gameweeks whose final stats have been scored in every league
+  playersAt?: number;         // ms, last player catalog refresh
+  retryRescore?: boolean;     // a league failed last tick: rescore everything next time
+  updatedAt: FirebaseFirestore.Timestamp;
+}
+
+/** seasons/{season}/gameweeks/{gw} */
+export interface SeasonGameweek {
+  stats: Record<string, PlayerGwStats>;
+  final: boolean;
+  hash?: string;              // content hash of `stats`, so unchanged pulls are not rewritten
   updatedAt: FirebaseFirestore.Timestamp;
 }
